@@ -1,33 +1,33 @@
 // ============================================================================
-//  main.cpp — 主程序：窗口 / 布局 / 交互 / 托盘 / 定时切换
+// main.cpp - Window, layout, input, tray, and scheduled wallpaper switching.
 //
-//  只在两个时间点之间切换壁纸：日间开始 ~ 夜间开始用主题的日间图，其余时间用
-//  夜间图；或跟随系统深浅色。设置改动即时保存到 %APPDATA%\Dynamic Wallpapers\config.ini。
+// Use the day image between day-start and night-start, and the night image otherwise,
+// or follow the system app theme. Save changes immediately to %APPDATA%\Dynamic Wallpapers\config.ini.
 //
-//  窗口：标准顶层窗口 + 自绘标题栏，Win11 圆角/阴影由 DWM 提供。
-//  最小化及从任务栏还原交给 Windows；最大化仍使用 StartZoom 的矩形过渡。
+// Standard top-level window with a custom caption; DWM supplies Windows 11 corners and shadows.
+// Windows handles minimize/taskbar restore; StartZoom animates maximize transitions.
 //
-//  命令行：--show 显示窗口 / --apply 立即应用并退出 / --autostart 开机静默进托盘 /
-//          --set-theme=名字 / --add-theme=文件夹 / --delete-theme=名字 /
-//          --uninstall 卸载 / --simulate-hour=19 模拟时间（测试）/ --opaque 关毛玻璃
+// CLI: --show opens the window; --apply applies once and exits; --autostart starts in the tray.
+// --set-theme=<name> / --add-theme=<folder> / --delete-theme=<name>.
+// --uninstall removes the app; --simulate-hour=19 tests scheduling; --opaque disables blur.
 // ============================================================================
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <windowsx.h>       // GET_X_LPARAM/GET_Y_LPARAM、GET_WHEEL_DELTA_WPARAM
+#include <windowsx.h>       // GET_X_LPARAM/GET_Y_LPARAM, GET_WHEEL_DELTA_WPARAM
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
-#include <imm.h>            // IME：主题名输入框自己处理 WM_IME_* 消息
-#include <winternl.h>       // RTL_OSVERSIONINFOW（判断系统版本决定用不用系统亚克力）
+#include <imm.h>            // The theme name editor handles WM_IME_* composition messages.
+#include <winternl.h>       // RTL_OSVERSIONINFOW selects acrylic support by Windows version.
 #include <d2d1_1.h>
 #include <d2d1helper.h>
 #include <dwmapi.h>
 #include <string>
 #include <vector>
-#include <cmath>            // powf（全屏切换动画的缓出曲线）
-// timeBeginPeriod(1) 把本进程计时器精度提到 1ms：默认 WM_TIMER 只有 ~15.6ms 的
-// 系统节拍（64fps），120Hz 屏上动画必然发卡。注意它提不高 GetTickCount64 的
-// 分辨率——动画时间基准一律用 QPC（见 qpcMs）。
+#include <cmath>            // powf for zoom animation easing.
+// timeBeginPeriod(1) requests 1 ms timer precision; the default ~15.6 ms WM_TIMER tick
+// cannot provide smooth animation on 120 Hz displays. This does not improve GetTickCount64,
+// so animations use QPC timestamps instead (see qpcMs).
 extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int);
 extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned int);
 #include "gfx.h"
@@ -40,39 +40,39 @@ extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned i
 #pragma comment(lib, "shell32")
 
 // ---------------------------------------------------------------------------
-//  常量与全局状态
+// Constants and global state.
 // ---------------------------------------------------------------------------
 static const wchar_t* kWindowClass = L"DynamicWallpapersMainWindow";
-// 保留标准标题栏样式供 Windows 管理最小化/还原；WM_NCCALCSIZE 只移除其可见区域。
+// Keep caption styles for native minimize/restore; WM_NCCALCSIZE removes only the visible frame.
 static constexpr DWORD kMainWindowStyle = WS_OVERLAPPEDWINDOW;
 static const wchar_t* kAppDisplay = L"Dynamic Wallpapers";
-static const wchar_t* kLegacyDisplay = L"壁纸随时间变化";   // 更名前：旧快捷方式/开始菜单文件夹名
-static const float kWinW = 700.0f;      // 默认窗口宽（DIP）
-static const float kWinH = 764.0f;      // 默认窗口高（DIP）— 与 ComputeLayout 的自然高度一致
-                                        // （改布局加/删分区后这里要跟着改，否则底部被裁）
+static const wchar_t* kLegacyDisplay = L"\u58c1\u7eb8\u968f\u65f6\u95f4\u53d8\u5316";   // Exact legacy shortcut/Start menu name, retained only for migration.
+static const float kWinW = 700.0f;      // Default window width in DIPs.
+static const float kWinH = 788.0f;      // Default height in DIPs; must match ComputeLayout's natural content height.
+                                        // Update this when adding or removing sections to avoid clipping the bottom.
 static const float kPadX = 24.0f;
-static const float kCardW = 152.0f;     // 主题卡片尺寸（DIP）
+static const float kCardW = 152.0f;     // Theme card dimensions in DIPs.
 static const float kCardH = 148.0f;
-static const float kCardGapY = 16.0f;   // 卡片行与行之间的竖直间距（DIP）
-static const int   kMaxCards = 6;       // 主题卡片每行最多几张（窗口拉宽后能放更多）
+static const float kCardGapY = 16.0f;   // Vertical gap between card rows in DIPs.
+static const int   kMaxCards = 6;       // Maximum cards per row in wide windows.
 static constexpr UINT kApplySelectionMessage = WM_APP + 6;
-static const int   kThemeSlots = 48;    // 卡片网格容量上限（同时决定卡片控件 ID 区间）
+static const int   kThemeSlots = 48;    // Grid capacity also determines the theme control ID ranges.
 
-// 控件 ID。主题卡片 ID = 基址 + 主题下标：
-//   100..147 选中 / 200..247 "×"删除 / 300..347 "✎"重命名
+// Theme control IDs are base ID plus theme index:
+// 100..147=select, 200..247=delete, 300..347=rename.
 enum CtrlId {
     CID_NONE = -1,
     CID_MIN = 1, CID_CLOSE, CID_MAX,
     CID_THEME0 = 100,
     CID_THEME_DEL0 = 200,
     CID_THEME_REN0 = 300,
-    // 滚动条：右侧滑块 + 轨道（整页滚动，见 DrawScrollbar / HitTest）
+    // Page scrollbar thumb and track; see DrawScrollbar / HitTest.
     CID_SCROLLBAR = 400, CID_SCROLLTRACK,
     CID_DAY_MINUS = 30, CID_DAY_PLUS, CID_NIGHT_MINUS, CID_NIGHT_PLUS,
     CID_AUTO = 40, CID_BOOT,
     CID_OPENTHEMES = 51, CID_ADD_THEME,
     CID_APPEARANCE0 = 60, CID_APPEARANCE1, CID_APPEARANCE2,
-    CID_SWITCH0 = 64, CID_SWITCH1,          // 切换方式分段控件：按时段 / 跟随系统
+    CID_SWITCH0 = 64, CID_SWITCH1,          // Switch mode segments: schedule / system theme.
     CID_OV_CANCEL = 70, CID_OV_OK, CID_OV_NAME = 76, CID_OV_LIGHT_SLOT, CID_OV_DARK_SLOT,
     CID_DLG_CANCEL = 80, CID_DLG_OK,
     CID_REN_CANCEL = 83, CID_REN_OK, CID_REN_NAME,
@@ -80,22 +80,22 @@ enum CtrlId {
 
 enum TimerId { TM_TICK = 1, TM_ANIM = 2, TM_CARET = 3, TM_WALLPAPER = 4 };
 
-// 布局（每帧重算；绘制与命中测试共用同一套矩形）。
-// 坐标系：所有矩形都是内容坐标，窗口坐标 y = 内容坐标 y - scroll。
-// 内容可整体上滚（滚轮/滚动条），标题栏与弹层不参与滚动。
+// Recomputed layout shared by rendering and hit testing.
+// Rectangles use content coordinates; window y = content y - scroll.
+// The page scrolls as a whole; the title bar and dialogs remain fixed.
 struct Layout {
-    float contentL = kPadX, contentR = 700.0f - kPadX;   // 宽窗口时居中并限宽
+    float contentL = kPadX, contentR = 700.0f - kPadX;   // Center and limit content width in wide windows.
     D2D1_RECT_F captionMin, captionClose, captionMax;
-    std::vector<D2D1_RECT_F> themeCards;    // 卡片网格（自动换行）
-    std::vector<D2D1_RECT_F> themeDel;      // 卡片右上角"×"
-    std::vector<D2D1_RECT_F> themeRen;      // 卡片右上角"✎"
+    std::vector<D2D1_RECT_F> themeCards;    // Wrapping card grid.
+    std::vector<D2D1_RECT_F> themeDel;      // Top-right delete button.
+    std::vector<D2D1_RECT_F> themeRen;      // Top-right rename button.
     int cardCount = 0;
     int perRow = 1;
-    float contentH = 0;                     // 内容总高（比窗口矮时 = 窗口高，不滚）
+    float contentH = 0;                     // Total content height; at least the viewport height.
     float visibleH = 0;
     float maxScroll = 0;
-    float scrollTrackTop = 0, scrollTrackH = 0;   // 滚动条轨道
-    int firstVis = 0, lastVis = -1;         // 视口内的卡片下标范围（含两端）
+    float scrollTrackTop = 0, scrollTrackH = 0;   // Scrollbar track.
+    int firstVis = 0, lastVis = -1;         // Inclusive range of visible card indices.
     D2D1_RECT_F addThemeBtn;
     D2D1_RECT_F dayStepper, nightStepper;
     D2D1_RECT_F appearanceSeg;
@@ -105,45 +105,45 @@ struct Layout {
     D2D1_RECT_F themeSectionTitle, timeSectionTitle, appearanceSectionTitle, optionSectionTitle;
     D2D1_RECT_F switchSectionTitle;
     D2D1_RECT_F statusRow;
-    D2D1_RECT_F ovCard, ovName;             // 添加主题弹层（两方框 + 名称输入框）
+    D2D1_RECT_F ovCard, ovName;             // Add-theme dialog with two image slots and a name field.
     D2D1_RECT_F ovLightSlot, ovDarkSlot;
     D2D1_RECT_F ovCancel, ovOk;
-    D2D1_RECT_F dlgCard, dlgCancel, dlgOk;  // 删除主题确认框
-    D2D1_RECT_F renCard, renField, renCancel, renOk;   // 重命名弹层
+    D2D1_RECT_F dlgCard, dlgCancel, dlgOk;  // Delete confirmation dialog.
+    D2D1_RECT_F renCard, renField, renCancel, renOk;   // Rename dialog.
 };
 
-// 删除主题确认框状态：hover 到卡片"×"后弹出，确认才真正删除
+// Delete confirmation state; actual deletion requires confirmation.
 struct DelUI {
     bool active = false;
     int idx = -1;
-    std::wstring err;                       // 删除失败的提示
+    std::wstring err;                       // Deletion error message.
 };
 
-// 自绘文本框的编辑状态（本程序唯一的输入框：主题名/重命名）。
-// 字符、←→ Home End Backspace Delete、Shift 扩展选择、Ctrl+A/V、光标闪烁；
-// 中文输入法走 WM_IME_* 消息，预编辑串自己画在光标处、带下划线。
+// Custom editor state for adding and renaming themes.
+// Supports text, arrows, Home/End, Backspace/Delete, Shift selection, Ctrl+A/V, and blinking caret.
+// IME uses WM_IME_*; draw underlined preedit text at the caret.
 struct TextEdit {
     std::wstring text;
-    int caret = 0;                          // 光标位置（0..text.size()）
-    int sel = 0;                            // 选择锚点（sel == caret 表示没选中）
-    std::wstring preedit;                   // 输入法预编辑串
+    int caret = 0;                          // Caret position in 0..text.size().
+    int sel = 0;                            // Selection anchor; sel == caret means no selection.
+    std::wstring preedit;                   // IME preedit text.
     bool hasSel() const { return sel != caret; }
     void selRange(int& a, int& b) const { a = sel < caret ? sel : caret; b = sel < caret ? caret : sel; }
     void clearSel() { sel = caret; }
 };
 
-// "添加主题"弹层：不弹文件夹选择——点两个方框各挑一张图，再起名字。
-// 主题 = 浅色（日间用）+ 深色（夜间用）两张不同的图片。
+// Add theme: choose an image in each slot, then enter a name.
+// A theme requires two distinct images: light/day and dark/night.
 struct AddThemeUI {
     bool active = false;
     std::wstring lightPath, darkPath;
-    ID2D1Bitmap* lightBmp = nullptr;        // 预览缩略图
+    ID2D1Bitmap* lightBmp = nullptr;        // Preview thumbnail.
     ID2D1Bitmap* darkBmp = nullptr;
     TextEdit name;
     std::wstring hint;
 };
 
-// 主题重命名弹层（卡片右上角"✎"打开，输入框预填当前名字）
+// Rename dialog opens from the card action with the current name prefilled.
 struct RenameUI {
     bool active = false;
     int idx = -1;
@@ -157,74 +157,74 @@ struct App {
     Config cfg;
     std::vector<ThemeInfo> themes;
     int selIdx = 0;
-    std::wstring appliedImage;               // 所有显示器确认后才更新，失败进行有限重试
+    std::wstring appliedImage;               // Update only after all monitors confirm; retry failures a limited number of times.
     int appliedStyle = -1;
-    bool applyingWallpaper = false;          // 防止壁纸广播设置变更时重入
+    bool applyingWallpaper = false;          // Prevent reentrancy from wallpaper settings broadcasts.
     bool readingWallpaper = false;
     bool selectionQueued = false;
     bool selectionDeferred = false;
     WallpaperTracker wallpaper;
     Palette pal;
-    bool glass = true;                      // 自绘磨砂底（--self-glass 强制时用）
-    bool liveGlass = false;                 // 系统亚克力（DWM 实时模糊窗口背后，Win11 22H2+）
-    bool solidBg = false;                   // 纯色底（Win10 默认 / --solid），跟随深浅色
-    float winWDip = kWinW, winHDip = kWinH; // 当前客户区尺寸（DIP）——全屏/分屏后布局跟着走
+    bool glass = true;                      // Custom frosted backdrop, forced by --self-glass.
+    bool liveGlass = false;                 // System acrylic with live DWM blur, Windows 11 22H2+.
+    bool solidBg = false;                   // Solid theme-aware background: default on Windows 10, or --solid.
+    float winWDip = kWinW, winHDip = kWinH; // Current client size in DIPs, updated for maximize/snap layouts.
     bool maximized = false;
-    // 最大化 / 从最大化还原的矩形过渡（最小化及从任务栏还原由 Windows 处理）。
+    // Animate maximize/restore rectangles; Windows handles minimize and taskbar restore.
     bool zooming = false;
     bool zoomToMax = false;
     RECT zoomFrom = {}, zoomTo = {};
-    RECT normRect = {};                     // 自记的"还原矩形"（不依赖系统的 rcNormalPosition）
-    double zoomStartMs = 0;                 // 动画起点：QPC 毫秒（不要用 GetTickCount64）
-    float zoomMs = 200.0f;                  // 全屏切换动画时长（--zoom-ms=N 可改）
-    // 整页滚动：scroll = 当前量，scrollTarget = 目标量（滚轮改它，动画缓动追上）
+    RECT normRect = {};                     // Track the restore rectangle independently of rcNormalPosition.
+    double zoomStartMs = 0;                 // Animation start in QPC milliseconds, not GetTickCount64.
+    float zoomMs = 200.0f;                  // Zoom duration, overridable with --zoom-ms=N.
+    // scroll is current position; wheel changes scrollTarget, which the animation approaches.
     float scroll = 0.0f, scrollTarget = 0.0f;
     double lastScrollMs = 0;
-    float sbAlpha = 0.0f;                   // 滚动条可见度（0~1，带淡入淡出）
+    float sbAlpha = 0.0f;                   // Scrollbar opacity from 0 to 1 with fade transitions.
     bool sbDragging = false;
     float sbDragGrab = 0.0f;
-    // 主题缩略图按主题下标缓存：只解码视口内（±一行缓冲）的主题，滚走就释放
+    // Cache thumbnails by theme index for the viewport plus one buffer row; release offscreen entries.
     std::vector<ID2D1Bitmap*> thumbs;
-    std::vector<char> thumbTried;           // 试过且失败的别再每帧重试
-    std::vector<char> delVisible;           // 上一帧该卡片是否画出了"×/✎"（命中只认画出来的）
-    ID2D1Bitmap* logoBmp = nullptr;         // 标题栏标记（exe 资源，退回手绘"左日右月"）
+    std::vector<char> thumbTried;           // Do not retry failed thumbnails every frame.
+    std::vector<char> delVisible;           // Only hit-test card actions that were actually drawn in the previous frame.
+    ID2D1Bitmap* logoBmp = nullptr;         // Embedded title-bar logo; fallback to a drawn sun/moon.
     bool logoTried = false;
     ID2D1LinearGradientBrush* bgBrush = nullptr;
-    ID2D1Layer* uiLayer = nullptr;          // 整帧透明度图层（窗口淡入淡出/时段置灰）
+    ID2D1Layer* uiLayer = nullptr;          // Whole-frame opacity for window fades and disabled schedule controls.
     Layout L;
     AddThemeUI addUI;
     DelUI delUI;
     RenameUI renUI;
-    // 本帧是否已压整帧透明度图层：里面再嵌一层（时段置灰）会让 D2D 只画出前半帧，
-    // 所以有外层图层时时段那块不再自己压层（淡出仅 150ms，观感察觉不到）。
+    // Avoid nesting a disabled-section layer inside a whole-frame layer: D2D can truncate the frame.
+    // Skipping the inner layer during the brief 150 ms fade is visually negligible.
     bool frameLayerPushed = false;
-    bool caretOn = true;                    // 输入框光标闪烁（统一 500ms 节拍）
-    HIMC himc = nullptr;                    // 输入法上下文（启动时摘下，有输入框时才挂上）
+    bool caretOn = true;                    // Caret blink on a shared 500 ms timer.
+    HIMC himc = nullptr;                    // Attach the IME context only while a text editor is open.
 
-    // 交互状态
+    // Interaction state.
     int hot = CID_NONE, pressed = CID_NONE;
-    float toggleAnim[2] = {1.0f, 0.0f};     // 0=自动切换 1=开机自启
+    float toggleAnim[2] = {1.0f, 0.0f};     // 0=automatic switching, 1=start with Windows.
     float toggleTarget[2] = {1.0f, 0.0f};
-    float segAnim = 0.0f;                   // 外观分段控件指示条位置（0..2）
+    float segAnim = 0.0f;                   // Appearance indicator position in 0..2.
     int segTarget = 0;
-    float segScale = 1.0f;                  // 按下时缩到 0.93，松手弹回
+    float segScale = 1.0f;                  // Shrink to 0.93 when pressed and spring back on release.
     bool segPressed = false;
-    float swAnim = 0.0f;                    // 切换方式分段控件（0..1），与外观同款
+    float swAnim = 0.0f;                    // Switch mode indicator in 0..1, using the appearance control's animation style.
     int swTarget = 0;
     float swScale = 1.0f;
     bool swPressed = false;
     bool trayAdded = false;
-    HICON trayIcon = nullptr;               // 托盘图标：只加载一次（重加时复用），WM_DESTROY 销毁
+    HICON trayIcon = nullptr;               // Load the tray icon once, reuse on re-add, and destroy on WM_DESTROY.
 
-    // 窗口显示/隐藏动画（淡入淡出 + 由下方轻推入）
+    // Window show/hide animation: fade plus a slight upward slide.
     float winAnim = 1.0f;
     float winAnimTarget = 1.0f;
     bool winAnimating = false;
     bool hideAfterAnim = false;
 
-    // 测试/调试
+    // Testing and diagnostics.
     int simulateHour = -1;
-    std::wstring statusMsg;                 // 临时提示（如"已应用"）
+    std::wstring statusMsg;                 // Temporary status message, such as wallpaper applied.
     ULONGLONG statusMsgUntil = 0;
 };
 static App g_app;
@@ -232,7 +232,7 @@ static ThumbLoader g_thumbLoader;
 static size_t g_thumbGeneration = 0;
 static const UINT kThumbReadyMessage = WM_APP + 5;
 
-// 只在动画期间提高计时精度，嵌套动画共享一次系统请求。
+// Request higher timer precision only during animation; nested animations share one request.
 static unsigned g_timerPrecisionUsers = 0;
 class AnimationTimerPrecision {
 public:
@@ -256,7 +256,7 @@ private:
 };
 static AnimationTimerPrecision g_animTimerPrecision;
 
-// 前向声明（本文件内互相调用）
+// Forward declarations for functions used across this file.
 static void ComputeLayout(Layout& L);
 static void UpdateScrollView(Layout& L);
 static void RefreshPalette();
@@ -285,7 +285,7 @@ static void MarkScrolled();
 static double qpcMs();
 
 // ---------------------------------------------------------------------------
-//  时间（--simulate-hour 测试钩子：只替换"小时"，分钟仍走真实时钟）
+// --simulate-hour overrides only the hour; minutes still use the real clock.
 // ---------------------------------------------------------------------------
 static int CurrentMinutes() {
     SYSTEMTIME st;
@@ -295,17 +295,17 @@ static int CurrentMinutes() {
 }
 
 // ---------------------------------------------------------------------------
-//  布局计算
+// Layout computation.
 // ---------------------------------------------------------------------------
 static void ComputeLayout(Layout& L) {
-    const float W = g_app.winWDip, H = g_app.winHDip;   // 实时窗口尺寸：全屏/分屏后跟着走
+    const float W = g_app.winWDip, H = g_app.winHDip;   // Use current window size for maximize/snap layouts.
 
-    // 标题栏按钮从右往左排，顺序严格是 min → max → close（宽 46 DIP，与 Win11 一致）
+    // Caption buttons follow Windows 11: minimize, maximize, close; each is 46 DIPs wide.
     L.captionClose = D2D1::RectF(W - 46, 0, W, Ui::TitleBarH);
     L.captionMax   = D2D1::RectF(W - 92, 0, W - 46, Ui::TitleBarH);
     L.captionMin   = D2D1::RectF(W - 138, 0, W - 92, Ui::TitleBarH);
 
-    // 内容区：窗口很宽（全屏）时限制宽度并居中，避免控件被拉得又长又空
+    // Limit and center content width to avoid stretching controls in maximized windows.
     const float kMaxContent = 1060.0f;
     float contentW = W - 2 * kPadX;
     if (contentW > kMaxContent) contentW = kMaxContent;
@@ -314,11 +314,11 @@ static void ComputeLayout(Layout& L) {
     L.contentL = lx;
     L.contentR = rx;
 
-    // ---- 主题卡片网格：一行放不下就换行，超出窗口的内容靠滚动看 ----
+    // Theme grid wraps to additional rows; overflow is accessible by scrolling.
     float y = 56;
     L.themeSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
     L.addThemeBtn = D2D1::RectF(rx - 116, y - 1, rx, y + 25);
-    y += 36;                                             // 区块标题 + 分隔线
+    y += 36;                                             // Section heading and divider.
     const float gap = 12;
     int total = (int)g_app.themes.size();
     if (total > kThemeSlots) total = kThemeSlots;
@@ -330,11 +330,11 @@ static void ComputeLayout(Layout& L) {
     L.themeCards.assign(total, D2D1::RectF(0, 0, 0, 0));
     L.themeDel.assign(total, D2D1::RectF(0, 0, 0, 0));
     L.themeRen.assign(total, D2D1::RectF(0, 0, 0, 0));
-    // 列位置按"铺满一整行"算一次，之后每行共用同一组列——最后一行张数少时
-    // 卡片仍落在上面各行同一列的下方（上下对齐的标准网格行为）
+    // Compute column positions once for a full row; reuse them for every row so a partial
+    // last row stays aligned with the columns above.
     float gy = y;
     if (total == 0) {
-        gy += kCardH + kCardGapY;                        // 没有主题也留一块高度放提示文字
+        gy += kCardH + kCardGapY;                        // Reserve room for an empty-state message even with no themes.
     } else {
         float used = perRow * kCardW;
         float sp = perRow > 1 ? (contentW - used) / (perRow - 1) : 0;
@@ -354,15 +354,15 @@ static void ComputeLayout(Layout& L) {
             gy += kCardH + kCardGapY;
         }
     }
-    y = gy - kCardGapY + 18;                             // 去掉最后一行行距，留区块间距
+    y = gy - kCardGapY + 18;                             // Replace the last row gap with section spacing.
 
-    // ---- 切换（切换方式：按时段 / 跟随系统深浅色）----
+    // Switch mode: schedule or system app theme.
     L.switchSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
     y += 36;
-    L.switchSeg = D2D1::RectF(rx - 196, y + 2, rx, y + 2 + 34);   // 宽 196 = 每段 98
+    L.switchSeg = D2D1::RectF(rx - 196, y + 2, rx, y + 2 + 34);   // 196 DIPs total, 98 per segment.
     y += 34 + 18;
 
-    // ---- 时段 ----
+    // Schedule.
     L.timeSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
     y += 36;
     const float stepperW = 132, stepperH = 36;
@@ -371,13 +371,13 @@ static void ComputeLayout(Layout& L) {
     L.nightStepper = D2D1::RectF(rx - stepperW, y, rx, y + stepperH);
     y += stepperH + 18;
 
-    // ---- 外观 ----
+    // Appearance.
     L.appearanceSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
     y += 36;
     L.appearanceSeg = D2D1::RectF(rx - 234, y, rx, y + 34);
     y += 34 + 18;
 
-    // ---- 选项 ----
+    // Options.
     L.optionSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
     y += 36;
     L.autoToggle  = D2D1::RectF(rx - Ui::ToggleW, y + 8, rx, y + 8 + Ui::ToggleH);
@@ -385,25 +385,26 @@ static void ComputeLayout(Layout& L) {
     L.bootToggle  = D2D1::RectF(rx - Ui::ToggleW, y + 8, rx, y + 8 + Ui::ToggleH);
     y += 36;
 
-    // ---- 状态行 + 底部按钮：窗口比自然高度高（全屏）时贴到窗口底部 ----
-    const float bottomBlock = 24 + 10 + Ui::ButtonH + 24;
+    // Keep the status row and bottom action at the bottom when the window is taller than the content.
+    const float statusH = 48;
+    const float bottomBlock = statusH + 10 + Ui::ButtonH + 24;
     float statusTop = y;
     float stickTop = H - bottomBlock;
     bool stick = stickTop > statusTop;
     if (stick) statusTop = stickTop;
-    L.statusRow = D2D1::RectF(lx, statusTop, rx, statusTop + 24);
-    L.openThemesBtn = D2D1::RectF(rx - 158, statusTop + 24 + 10, rx,
-                                  statusTop + 24 + 10 + Ui::ButtonH);
-    // 内容总高 = 滚动的依据：真超出窗口才加 24 底部留白，差几个 DIP 时不留白
-    //（否则平白多出一条几乎滚不动的滚动条）
-    const float naturalBottom = statusTop + 24 + 10 + Ui::ButtonH;
+    L.statusRow = D2D1::RectF(lx, statusTop, rx, statusTop + statusH);
+    L.openThemesBtn = D2D1::RectF(rx - 180, statusTop + statusH + 10, rx,
+                                  statusTop + statusH + 10 + Ui::ButtonH);
+    // Add 24 DIPs of bottom padding only for real overflow, avoiding a nearly immovable scrollbar
+    // when the content exceeds the viewport by only a few DIPs.
+    const float naturalBottom = statusTop + statusH + 10 + Ui::ButtonH;
     float contentBottom = naturalBottom;
     if (naturalBottom - H > 4.0f) contentBottom = naturalBottom + 24.0f;
     if (contentBottom < H) contentBottom = H;
     L.contentH = contentBottom;
 
-    // ---- 添加主题弹层（居中卡片；窗口变高时也居中）----
-    const float cw = 560, ch = 400;
+    // Centered Add theme dialog.
+    const float cw = 560, ch = 424;
     float cx = (W - cw) / 2, cy0 = (H - ch) / 2 - 40;
     if (cy0 < 90) cy0 = 90;
     L.ovCard = D2D1::RectF(cx, cy0, cx + cw, cy0 + ch);
@@ -416,8 +417,8 @@ static void ComputeLayout(Layout& L) {
     L.ovOk     = D2D1::RectF(L.ovCard.right - 24 - 108, L.ovCard.bottom - 24 - 34,
                              L.ovCard.right - 24, L.ovCard.bottom - 24);
 
-    // ---- 删除主题确认框 ----
-    const float dw = 470, dh = 214;
+    // Delete confirmation dialog.
+    const float dw = 470, dh = 254;
     float dx = (W - dw) / 2, dy0 = (H - dh) / 2 - 24;
     L.dlgCard = D2D1::RectF(dx, dy0, dx + dw, dy0 + dh);
     L.dlgCancel = D2D1::RectF(L.dlgCard.right - 24 - 116 - 108, L.dlgCard.bottom - 24 - 34,
@@ -425,8 +426,8 @@ static void ComputeLayout(Layout& L) {
     L.dlgOk     = D2D1::RectF(L.dlgCard.right - 24 - 108, L.dlgCard.bottom - 24 - 34,
                               L.dlgCard.right - 24, L.dlgCard.bottom - 24);
 
-    // ---- 主题重命名弹层 ----
-    const float rw = 470, rh = 246;
+    // Rename dialog.
+    const float rw = 470, rh = 270;
     float renX = (W - rw) / 2, renY = (H - rh) / 2 - 24;
     L.renCard  = D2D1::RectF(renX, renY, renX + rw, renY + rh);
     L.renField = D2D1::RectF(L.renCard.left + 24, L.renCard.top + 104,
@@ -436,25 +437,25 @@ static void ComputeLayout(Layout& L) {
     L.renOk     = D2D1::RectF(L.renCard.right - 24 - 108, L.renCard.bottom - 24 - 34,
                               L.renCard.right - 24, L.renCard.bottom - 24);
 
-    // 滚动视图度量必须在最后重算
+    // Recompute scroll metrics last.
     UpdateScrollView(L);
 }
 
 // ---------------------------------------------------------------------------
-//  整页滚动：布局矩形是内容坐标，画的时候整体平移 -scroll；
-//  鼠标窗口坐标 y 对应的内容坐标是 y + scroll（见 HitTest / RenderFrame）。
+// Translate layout rectangles by -scroll for drawing.
+// Convert pointer y to y + scroll for hit testing; see HitTest / RenderFrame.
 // ---------------------------------------------------------------------------
 static void VisibleCardRange(const Layout& L, float scroll, int& first, int& last) {
     first = 0;
     last = L.cardCount - 1;
-    const float viewTop = scroll + Ui::TitleBarH;        // 视口上缘（标题栏以下才算可见）
+    const float viewTop = scroll + Ui::TitleBarH;        // Visible content begins below the title bar.
     const float viewBot = scroll + g_app.winHDip;
     while (first < L.cardCount && L.themeCards[first].bottom <= viewTop) ++first;
     while (last >= first && L.themeCards[last].top >= viewBot) --last;
 }
 
-// 重算滚动度量：最大可滚量、滚动条轨道，并把 scroll/scrollTarget 夹回合法范围。
-// ComputeLayout 结尾必须调它；窗口尺寸或主题数一变，可滚量就变了。
+// Update maximum scroll, track dimensions, and clamp current/target scroll values.
+// Call at the end of ComputeLayout whenever window size or theme count changes.
 static void UpdateScrollView(Layout& L) {
     const float H = g_app.winHDip;
     L.visibleH = H;
@@ -462,12 +463,12 @@ static void UpdateScrollView(Layout& L) {
     if (maxS < 0) maxS = 0;
     L.maxScroll = maxS;
     if (maxS <= 0.0f) {
-        g_app.scroll = 0.0f;                 // 内容放得下：回顶部，否则多出一条空白
+        g_app.scroll = 0.0f;                 // Return to the top if all content fits, avoiding a blank strip.
         g_app.scrollTarget = 0.0f;
     } else {
         if (g_app.scrollTarget > maxS) g_app.scrollTarget = maxS;
         if (g_app.scrollTarget < 0) g_app.scrollTarget = 0;
-        if (g_app.scroll > maxS) g_app.scroll = maxS;    // 窗口缩小/主题变少立刻夹回
+        if (g_app.scroll > maxS) g_app.scroll = maxS;    // Clamp immediately after shrinking the window or reducing the theme count.
         if (g_app.scroll < 0) g_app.scroll = 0;
     }
     L.scrollTrackTop = Ui::TitleBarH + 6;
@@ -481,8 +482,8 @@ static void ClampScrollTarget() {
     if (g_app.scrollTarget < 0) g_app.scrollTarget = 0;
 }
 
-// 滚动条滑块矩形（按当前 scroll 实时算；绘制与命中测试共用）。
-// 滑块长 = 轨道长 × (窗口高 / 内容高)，最短 36 DIP。
+// Compute the thumb from current scroll; share this rectangle between rendering and hit testing.
+// Thumb length = track length * viewport/content height, with a 36 DIP minimum.
 static D2D1_RECT_F ScrollThumbRect() {
     const Layout& L = g_app.L;
     float trackH = L.scrollTrackH;
@@ -502,8 +503,8 @@ static void MarkScrolled() {
     g_app.lastScrollMs = qpcMs();
 }
 
-// 选中的主题一定要看得见：只在卡片被视口上/下缘切掉时才动滚动位置。
-// instant = true 直接就位（启动时用，不要开机滚一下）。
+// Scroll only when the selected card is clipped at the top or bottom of the viewport.
+// Use instant=true at startup to avoid an unnecessary scroll animation.
 static void EnsureCardVisible(int idx, bool instant) {
     const Layout& L = g_app.L;
     if (idx < 0 || idx >= (int)L.themeCards.size()) return;
@@ -518,18 +519,18 @@ static void EnsureCardVisible(int idx, bool instant) {
         t = L.themeCards[idx].bottom + pad - g_app.winHDip;
     if (t < 0) t = 0;
     if (t > L.maxScroll) t = L.maxScroll;
-    if (t == g_app.scrollTarget) return;                     // 没变化就别白播一段动画
+    if (t == g_app.scrollTarget) return;                     // Skip animation when nothing changed.
     g_app.scrollTarget = t;
     if (instant) g_app.scroll = t;
     MarkScrolled();
 }
 
-// 命中测试：把鼠标位置（DIP，窗口坐标）映射成控件 id
+// Map pointer coordinates in window DIPs to a control ID.
 static int HitTest(float x, float y) {
     const Layout& L = g_app.L;
     auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; };
 
-    // 弹层打开时只响应弹层内的控件（弹层不随内容滚动）
+    // Modal dialogs handle only their own controls and do not scroll with the page.
     if (g_app.addUI.active) {
         if (in(L.ovCancel)) return CID_OV_CANCEL;
         if (in(L.ovOk)) return CID_OV_OK;
@@ -550,16 +551,16 @@ static int HitTest(float x, float y) {
         return CID_NONE;
     }
 
-    // 标题栏：固定不滚动（窗口坐标直接判断）。
-    // 最大化按钮走非客户区命中（WM_NCHITTEST 返回 HTMAXBUTTON），这里不管；
-    // 内容即使被滚到标题栏底下也不该被点到（视觉上在裁剪区外）。
+    // The fixed title bar uses window coordinates directly.
+    // Maximize uses nonclient HTMAXBUTTON hit testing for native snap layouts.
+    // Content scrolled beneath the title bar is clipped and must not receive clicks.
     if (y < Ui::TitleBarH) {
         if (in(L.captionClose)) return CID_CLOSE;
         if (in(L.captionMin)) return CID_MIN;
         return CID_NONE;
     }
 
-    // 滚动条：看得见（不透明度够）才点得到；滑块拖动 / 轨道翻页
+    // Only a visible scrollbar is interactive; support thumb dragging and track paging.
     if (L.maxScroll > 0.0f && g_app.sbAlpha > 0.15f && x >= g_app.winWDip - 14.0f) {
         if (in(ScrollThumbRect())) return CID_SCROLLBAR;
         D2D1_RECT_F track = D2D1::RectF(g_app.winWDip - 14.0f, L.scrollTrackTop,
@@ -567,14 +568,14 @@ static int HitTest(float x, float y) {
         if (in(track)) return CID_SCROLLTRACK;
     }
 
-    // 内容区：鼠标 y → 内容坐标（y + scroll）再和布局矩形比
+    // Map pointer y to content y + scroll before comparing layout rectangles.
     const float cy = y + g_app.scroll;
     auto inC = [&](const D2D1_RECT_F& r) {
         return x >= r.left && x <= r.right && cy >= r.top && cy <= r.bottom;
     };
 
     if (inC(L.addThemeBtn)) return CID_ADD_THEME;
-    // 卡片右上角小按钮：只在悬停该卡片（按钮画出来了）时才能点，避免误删/误改
+    // Card actions are clickable only when drawn on a hovered card, avoiding accidental changes.
     for (int i = 0; i < L.cardCount; ++i)
         if (i < (int)g_app.delVisible.size() && g_app.delVisible[i] && inC(L.themeDel[i]))
             return CID_THEME_DEL0 + i;
@@ -583,7 +584,7 @@ static int HitTest(float x, float y) {
             return CID_THEME_REN0 + i;
     for (int i = 0; i < L.cardCount; ++i)
         if (inC(L.themeCards[i])) return CID_THEME0 + i;
-    // 时间步进器：左右各 36 宽。跟随系统模式下时段不生效：不响应点击（画成半透明）
+    // Steppers have 36 DIP end buttons. Disable schedule interaction while following the system theme.
     if (g_app.cfg.switchMode == 0) {
         if (inC(L.dayStepper))
             return x < L.dayStepper.left + 36 ? CID_DAY_MINUS : CID_DAY_PLUS;
@@ -606,7 +607,7 @@ static int HitTest(float x, float y) {
 }
 
 // ---------------------------------------------------------------------------
-//  壁纸应用
+// Wallpaper application.
 // ---------------------------------------------------------------------------
 static const ThemeInfo* SelectedTheme() {
     if (g_app.cfg.noTheme) return nullptr;
@@ -631,8 +632,8 @@ static void WallpaperApplyFailed() {
     g_app.appliedImage.clear();
     g_app.appliedStyle = -1;
     g_app.statusMsg = g_app.wallpaper.attempts >= WallpaperTracker::maxAttempts
-        ? L"壁纸切换失败，已停止重试；可点击立即应用重试"
-        : L"尚未确认壁纸切换，将重试";
+        ? L"Switch failed. Choose Apply now to retry."
+        : L"Wallpaper change unconfirmed. Retrying...";
     g_app.statusMsgUntil = GetTickCount64() + 6000;
 }
 
@@ -662,7 +663,7 @@ static void CheckExternalWallpaper(ULONGLONG now = GetTickCount64()) {
         g_app.appliedImage = g_app.wallpaper.target;
         g_app.appliedStyle = g_app.wallpaper.style;
         g_app.statusMsg = SameWallpaperPath(g_app.appliedImage, day)
-            ? L"已应用浅色壁纸" : L"已应用深色壁纸";
+            ? L"Light wallpaper applied" : L"Dark wallpaper applied";
         g_app.statusMsgUntil = GetTickCount64() + 4000;
         if (g_app.glass) EnsureGlassBitmap(true);
     } else if (result == WallpaperTracker::Result::TimedOut) {
@@ -674,7 +675,7 @@ static void CheckExternalWallpaper(ULONGLONG now = GetTickCount64()) {
         g_app.appliedImage.clear();
         g_app.appliedStyle = -1;
         g_app.wallpaper.ResetSelection();
-        g_app.statusMsg = L"检测到主题外壁纸，已退出主题";
+        g_app.statusMsg = L"External wallpaper detected. Theme deselected.";
         g_app.statusMsgUntil = GetTickCount64() + 6000;
         SaveConfig(g_app.cfg);
         if (g_app.glass) EnsureGlassBitmap(true);
@@ -683,8 +684,8 @@ static void CheckExternalWallpaper(ULONGLONG now = GetTickCount64()) {
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
-// 当前该显示哪张壁纸：0=浅色（主题里的日间图）1=深色（夜间图）。
-// 切换方式 0 = 按时段；1 = 跟随系统深浅色。两种方式共用同一对图片，只是依据不同。
+// Desired wallpaper stage: 0=light/day, 1=dark/night.
+// Schedule and system modes share the same pair of images but choose them differently.
 static int TargetStage() {
     if (g_app.cfg.switchMode == 1) return SystemUsesDarkMode() ? 1 : 0;
     return StageAt(g_app.cfg, CurrentMinutes());
@@ -733,7 +734,7 @@ static void ApplyCurrent(bool force, bool explicitRequest) {
     if (generation != g_app.wallpaper.generation) return;
     g_app.wallpaper.Applied(ok);
     if (ok) {
-        g_app.statusMsg = L"正在确认壁纸切换";
+        g_app.statusMsg = L"Confirming wallpaper change...";
         g_app.statusMsgUntil = GetTickCount64() + 4000;
         CheckExternalWallpaper();
     } else {
@@ -744,11 +745,11 @@ static void ApplyCurrent(bool force, bool explicitRequest) {
 }
 
 // ---------------------------------------------------------------------------
-//  绘制
+// Drawing.
 // ---------------------------------------------------------------------------
 static void DrawTitleBar(Gfx& g, const Palette& p) {
-    // 应用标记：logo（exe 资源 IDR_LOGO_PNG，圆形裁切已烘在图片里），20 DIP 见方；
-    // 取不到时退回手绘的"左日右月"
+    // Draw the embedded IDR_LOGO_PNG logo at 20 DIPs; its shape is baked into the image.
+    // Fall back to a hand-drawn sun and moon.
     float ix = 24, iy = Ui::TitleBarH / 2;
     if (!g_app.logoBmp && !g_app.logoTried) {
         g_app.logoTried = true;
@@ -772,7 +773,7 @@ static void DrawTitleBar(Gfx& g, const Palette& p) {
     IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     g.textOptical(kAppDisplay, f, D2D1::RectF(46, 0, 400, Ui::TitleBarH), p.textPrimary);
 
-    // 最大化/还原、最小化、关闭（最大化用 HTMAXBUTTON，悬停时系统弹"贴靠布局"浮出）
+    // Caption buttons; HTMAXBUTTON lets Windows show its snap layout flyout.
     int maxMode = g_app.maximized ? Ui::CAP_RESTORE : Ui::CAP_MAX;
     UiCaptionButton(g, g_app.L.captionMax, maxMode, g_app.hot == CID_MAX,
                     g_app.pressed == CID_MAX, p);
@@ -785,30 +786,31 @@ static void DrawTitleBar(Gfx& g, const Palette& p) {
 static void DrawThemes(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     if ((int)g_app.delVisible.size() != kThemeSlots) g_app.delVisible.assign(kThemeSlots, 0);
-    for (int i = 0; i < kThemeSlots; ++i) g_app.delVisible[i] = 0;   // 清上一帧的可见标记
+    for (int i = 0; i < kThemeSlots; ++i) g_app.delVisible[i] = 0;   // Clear the previous frame's action visibility flags.
     UiSectionTitle(g, L.themeSectionTitle.left, L.themeSectionTitle.top,
-                   L.themeSectionTitle.right - L.themeSectionTitle.left, L"主题", p);
-    UiTextButton(g, L.addThemeBtn, L"添加主题", p, g_app.hot == CID_ADD_THEME,
+                   L.themeSectionTitle.right - L.themeSectionTitle.left, L"Themes", p);
+    UiTextButton(g, L.addThemeBtn, L"Add theme", p, g_app.hot == CID_ADD_THEME,
                  g_app.pressed == CID_ADD_THEME, L"\uE710");
     if (L.cardCount == 0) {
-        IDWriteTextFormat* f = g.format(FONT_UI, 12.5f);
-        g.text(L"还没有主题：点右上角「添加主题」，选一个放着壁纸图片的文件夹，挑出浅色、深色两张即可",
+        IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_NORMAL,
+                                      DWRITE_TEXT_ALIGNMENT_LEADING, true);
+        g.text(L"No themes yet. Click Add theme and choose a light and a dark wallpaper.",
                f, D2D1::RectF(L.contentL, L.themeSectionTitle.top + 40, L.contentR,
-                              L.themeSectionTitle.top + 64), p.textSecondary);
+                              L.themeSectionTitle.top + 88), p.textSecondary);
         return;
     }
-    // 只画视口内的卡片（firstVis/lastVis 由 SyncThumbs 按滚动位置算好）
+    // Draw only visible cards; SyncThumbs computes firstVis/lastVis from the viewport.
     for (int ti = L.firstVis; ti <= L.lastVis; ++ti) {
         if (ti < 0 || ti >= L.cardCount || ti >= (int)g_app.themes.size()) continue;
-        // 主题固定是"浅色 + 深色"两张；老主题（多图）仍显示张数
+        // New themes use light/dark pairs; show image counts for legacy multi-image themes.
         std::wstring sub = (g_app.themes[ti].imageCount == 2)
-                               ? L"浅色 + 深色"
-                               : (std::to_wstring(g_app.themes[ti].imageCount) + L" 张图片");
+                               ? L"Light + dark"
+                               : (std::to_wstring(g_app.themes[ti].imageCount) + L" images");
         bool showDel = (g_app.hot == CID_THEME0 + ti || g_app.hot == CID_THEME_DEL0 + ti ||
                         g_app.hot == CID_THEME_REN0 + ti);
         bool delHot  = (g_app.hot == CID_THEME_DEL0 + ti);
         bool renHot  = (g_app.hot == CID_THEME_REN0 + ti);
-        g_app.delVisible[ti] = showDel ? 1 : 0;   // 命中测试用：只认"画出来了"的按钮
+        g_app.delVisible[ti] = showDel ? 1 : 0;   // Hit testing recognizes only actions that were drawn.
         ID2D1Bitmap* thumb = (ti < (int)g_app.thumbs.size()) ? g_app.thumbs[ti] : nullptr;
         UiThemeCard(g, L.themeCards[ti], thumb, g_app.themes[ti].name, sub,
                     !g_app.cfg.noTheme && ti == g_app.selIdx, g_app.hot == CID_THEME0 + ti, p,
@@ -819,15 +821,15 @@ static void DrawThemes(Gfx& g, const Palette& p) {
 static void DrawAppearance(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     UiSectionTitle(g, L.appearanceSectionTitle.left, L.appearanceSectionTitle.top,
-                   L.appearanceSectionTitle.right - L.appearanceSectionTitle.left, L"外观", p);
+                   L.appearanceSectionTitle.right - L.appearanceSectionTitle.left, L"Appearance", p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    g.textOptical(L"界面模式", f, D2D1::RectF(L.contentL, L.appearanceSeg.top, L.appearanceSeg.left - 12, L.appearanceSeg.bottom),
+    g.textOptical(L"App theme", f, D2D1::RectF(L.contentL, L.appearanceSeg.top, L.appearanceSeg.left - 12, L.appearanceSeg.bottom),
                   p.textPrimary);
-    std::vector<std::wstring> items = {L"跟随系统", L"浅色", L"深色"};
+    std::vector<std::wstring> items = {L"System", L"Light", L"Dark"};
     int hotSeg = -1;
     if (g_app.hot >= CID_APPEARANCE0 && g_app.hot <= CID_APPEARANCE2)
         hotSeg = g_app.hot - CID_APPEARANCE0;
-    // 外观从托盘菜单等处被改动时这里也会自动开始滑动（不用各处分别触发）
+    // Changes from the tray menu also trigger the appearance indicator animation here.
     if (g_app.segTarget != g_app.cfg.appearance) {
         g_app.segTarget = g_app.cfg.appearance;
         StartAnim();
@@ -839,16 +841,16 @@ static void DrawAppearance(Gfx& g, const Palette& p) {
 static void DrawSwitchSection(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     UiSectionTitle(g, L.switchSectionTitle.left, L.switchSectionTitle.top,
-                   L.switchSectionTitle.right - L.switchSectionTitle.left, L"切换", p);
+                   L.switchSectionTitle.right - L.switchSectionTitle.left, L"Switching", p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    g.textOptical(L"切换方式", f, D2D1::RectF(L.contentL, L.switchSeg.top, L.switchSeg.left - 12, L.switchSeg.bottom),
+    g.textOptical(L"Switch mode", f, D2D1::RectF(L.contentL, L.switchSeg.top, L.switchSeg.left - 12, L.switchSeg.bottom),
                   p.textPrimary);
-    // 指示条平滑滑动 + 按下缩一下；从托盘菜单改了模式时这里也会自动开始滑动
+    // Smooth indicator motion and press scaling also reflect mode changes from the tray menu.
     if (g_app.swTarget != g_app.cfg.switchMode) {
         g_app.swTarget = g_app.cfg.switchMode;
         StartAnim();
     }
-    std::vector<std::wstring> modes = {L"按时段", L"跟随系统"};
+    std::vector<std::wstring> modes = {L"Schedule", L"System"};
     int hotSw = (g_app.hot == CID_SWITCH0) ? 0 : (g_app.hot == CID_SWITCH1 ? 1 : -1);
     UiSegmented(g, L.switchSeg, modes, g_app.cfg.switchMode, hotSw, p,
                 g_app.swAnim, g_app.swScale);
@@ -856,9 +858,9 @@ static void DrawSwitchSection(Gfx& g, const Palette& p) {
 
 static void DrawTimeSection(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
-    // 跟随系统模式下这一整块画成半透明（视觉上="不生效"），右下角另加一句说明。
-    // 外层已有整帧透明度图层时不再嵌套（嵌套会让 D2D 只画出前半帧，
-    // 见 App::frameLayerPushed）
+    // Dim the schedule section in system mode and show an explanatory note.
+    // Do not nest this layer inside a whole-frame opacity layer; D2D can truncate the frame.
+    // See App::frameLayerPushed.
     bool dim = (g_app.cfg.switchMode == 1) && !g_app.frameLayerPushed;
     if (dim) {
         if (!g_app.uiLayer) g.dc()->CreateLayer(nullptr, &g_app.uiLayer);
@@ -872,12 +874,12 @@ static void DrawTimeSection(Gfx& g, const Palette& p) {
         }
     }
     UiSectionTitle(g, L.timeSectionTitle.left, L.timeSectionTitle.top,
-                   L.timeSectionTitle.right - L.timeSectionTitle.left, L"时段", p);
+                   L.timeSectionTitle.right - L.timeSectionTitle.left, L"Schedule", p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    // 行内标签与右侧控件同高，按墨迹居中（中文/数字不会看着偏上）
-    g.textOptical(L"日间开始", f, D2D1::RectF(L.contentL, L.dayStepper.top, L.dayStepper.left - 12, L.dayStepper.bottom),
+    // Align row labels with adjacent controls using optical vertical centering.
+    g.textOptical(L"Day starts", f, D2D1::RectF(L.contentL, L.dayStepper.top, L.dayStepper.left - 12, L.dayStepper.bottom),
                   p.textPrimary);
-    g.textOptical(L"夜间开始", f, D2D1::RectF(L.contentL, L.nightStepper.top, L.nightStepper.left - 12, L.nightStepper.bottom),
+    g.textOptical(L"Night starts", f, D2D1::RectF(L.contentL, L.nightStepper.top, L.nightStepper.left - 12, L.nightStepper.bottom),
                   p.textPrimary);
     UiStepper(g, L.dayStepper, FormatHM(g_app.cfg.dayStart), p,
               g_app.hot == CID_DAY_MINUS ? 0 : (g_app.hot == CID_DAY_PLUS ? 1 : -1),
@@ -888,7 +890,7 @@ static void DrawTimeSection(Gfx& g, const Palette& p) {
     if (dim) {
         g.dc()->PopLayer();
         IDWriteTextFormat* fHint = g.format(FONT_UI, 12.0f);
-        g.textOptical(L"当前跟随系统深浅色，时段设置不生效", fHint,
+        g.textOptical(L"Following the system theme. Schedule is inactive.", fHint,
                       D2D1::RectF(L.contentL, L.timeSectionTitle.top, L.contentR, L.timeSectionTitle.top + 20),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
@@ -897,11 +899,11 @@ static void DrawTimeSection(Gfx& g, const Palette& p) {
 static void DrawOptions(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     UiSectionTitle(g, L.optionSectionTitle.left, L.optionSectionTitle.top,
-                   L.optionSectionTitle.right - L.optionSectionTitle.left, L"选项", p);
+                   L.optionSectionTitle.right - L.optionSectionTitle.left, L"Options", p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    g.textOptical(L"自动切换壁纸", f, D2D1::RectF(L.contentL, L.autoToggle.top, L.autoToggle.left - 12, L.autoToggle.bottom),
+    g.textOptical(L"Switch wallpapers automatically", f, D2D1::RectF(L.contentL, L.autoToggle.top, L.autoToggle.left - 12, L.autoToggle.bottom),
                   p.textPrimary);
-    g.textOptical(L"开机自动启动", f, D2D1::RectF(L.contentL, L.bootToggle.top, L.bootToggle.left - 12, L.bootToggle.bottom),
+    g.textOptical(L"Start with Windows", f, D2D1::RectF(L.contentL, L.bootToggle.top, L.bootToggle.left - 12, L.bootToggle.bottom),
                   p.textPrimary);
     UiToggle(g, L.autoToggle.left, L.autoToggle.top, g_app.cfg.autoSwitch, g_app.toggleAnim[0],
              g_app.hot == CID_AUTO, p);
@@ -912,25 +914,28 @@ static void DrawOptions(Gfx& g, const Palette& p) {
 static void DrawStatus(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     const ThemeInfo* t = SelectedTheme();
-    float cy = (L.statusRow.top + L.statusRow.bottom) / 2;
+    const float firstRowBottom = L.statusRow.top + 24;
+    float cy = L.statusRow.top + 12;
     int stage = TargetStage();
     UiStatusDot(g, L.statusRow.left + 5, cy, stage == 1, p);
 
     IDWriteTextFormat* fBold = g.format(FONT_UI, 13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     IDWriteTextFormat* fSmall = g.format(FONT_UI, 12.0f);
-    // 从左到右依次排布文本块：当前状态 -> 模拟标记/提示 -> 图片名
+    // Keep status details on the first line and schedule information on the second.
+    g.dc()->PushAxisAlignedClip(D2D1::RectF(L.statusRow.left, L.statusRow.top,
+        L.statusRow.right, firstRowBottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     float x = L.statusRow.left + 18;
     auto run = [&](const std::wstring& s, IDWriteTextFormat* f, const D2D1_COLOR_F& c) {
         if (s.empty()) return;
         float w = g.textWidth(s, f);
-        g.textOptical(s, f, D2D1::RectF(x, L.statusRow.top, x + w + 2, L.statusRow.bottom), c);
+        g.textOptical(s, f, D2D1::RectF(x, L.statusRow.top, x + w + 2, firstRowBottom), c);
         x += w + 7;
     };
-    std::wstring cur = (stage == 0) ? L"浅色" : L"深色";
-    std::wstring src = (g_app.cfg.switchMode == 1) ? L"跟随系统"
-                                                   : (stage == 0 ? L"日间时段" : L"夜间时段");
-    run(t ? std::wstring(L"当前：") + cur + L"（" + src + L"）" : L"当前：无主题", fBold, p.textPrimary);
-    if (g_app.simulateHour >= 0) run(L"模拟", fSmall, p.accentText);
+    std::wstring cur = (stage == 0) ? L"Light" : L"Dark";
+    std::wstring src = (g_app.cfg.switchMode == 1) ? L"System"
+                                                   : (stage == 0 ? L"Daytime" : L"Nighttime");
+    run(t ? std::wstring(L"Current: ") + cur + L" (" + src + L")" : L"No theme selected", fBold, p.textPrimary);
+    if (g_app.simulateHour >= 0) run(L"Simulated", fSmall, p.accentText);
     if (!g_app.statusMsg.empty() && GetTickCount64() < g_app.statusMsgUntil) {
         run(g_app.statusMsg, fSmall, p.accentText);
     } else if (t) {
@@ -939,37 +944,38 @@ static void DrawStatus(Gfx& g, const Palette& p) {
         run(sl == std::wstring::npos ? img : img.substr(sl + 1), fSmall, p.textSecondary);
     }
 
-    // 右侧：下次切换倒计时 / 跟随系统时的来源说明 / 已暂停
+    g.dc()->PopAxisAlignedClip();
+    // Second line: next switch countdown, system mode source, or paused state.
     IDWriteTextFormat* fRight = g.format(FONT_UI, 12.0f);
     if (!t) {
-        g.textOptical(L"选择主题以启用壁纸切换", fRight,
-                      D2D1::RectF((L.contentL + L.contentR) / 2, L.statusRow.top,
+        g.textOptical(L"Select a theme to enable wallpaper switching.", fRight,
+                      D2D1::RectF(L.contentL, firstRowBottom,
                                   L.statusRow.right, L.statusRow.bottom),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (!g_app.cfg.autoSwitch) {
-        g.textOptical(L"自动切换已暂停（托盘菜单里可打开）", fRight,
-                      D2D1::RectF((L.contentL + L.contentR) / 2, L.statusRow.top,
+        g.textOptical(L"Switching paused. Enable it from the tray menu.", fRight,
+                      D2D1::RectF(L.contentL, firstRowBottom,
                                   L.statusRow.right, L.statusRow.bottom),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else if (g_app.cfg.switchMode == 1) {
-        std::wstring right = std::wstring(L"跟随 Windows 应用模式（当前：") +
-                             (SystemUsesDarkMode() ? L"深色" : L"浅色") + L"）";
+        std::wstring right = std::wstring(L"Following Windows app mode (currently: ") +
+                             (SystemUsesDarkMode() ? L"Dark" : L"Light") + L")";
         g.textOptical(right, fRight,
-                      D2D1::RectF((L.contentL + L.contentR) / 2, L.statusRow.top,
+                      D2D1::RectF(L.contentL, firstRowBottom,
                                   L.statusRow.right, L.statusRow.bottom),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else {
-        std::wstring right = std::wstring(L"下次切换 ") + FormatHM(NextSwitchAt(g_app.cfg, CurrentMinutes())) +
-                             L"（还有 " + FormatDuration(MinutesUntilSwitch(g_app.cfg, CurrentMinutes())) + L"）";
+        std::wstring right = std::wstring(L"Next switch: ") + FormatHM(NextSwitchAt(g_app.cfg, CurrentMinutes())) +
+                             L" (in " + FormatDuration(MinutesUntilSwitch(g_app.cfg, CurrentMinutes())) + L")";
         g.textOptical(right, fRight,
-                      D2D1::RectF((L.contentL + L.contentR) / 2, L.statusRow.top,
+                      D2D1::RectF(L.contentL, firstRowBottom,
                                   L.statusRow.right, L.statusRow.bottom),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
 }
 
 // ---------------------------------------------------------------------------
-//  文本输入框：编辑逻辑（主题名 / 重命名都用）
+// Text editor shared by theme creation and renaming.
 // ---------------------------------------------------------------------------
 static std::wstring TrimStr(const std::wstring& s) {
     size_t a = s.find_first_not_of(L" \t\r\n");
@@ -978,7 +984,7 @@ static std::wstring TrimStr(const std::wstring& s) {
     return s.substr(a, b - a + 1);
 }
 
-// 有选区时先删掉选区（输入/粘贴/退格都先走这一步）
+// Remove any selection before inserting, pasting, or deleting text.
 static void EditDeleteSelection(TextEdit& e) {
     if (!e.hasSel()) return;
     int a, b;
@@ -990,7 +996,7 @@ static void EditDeleteSelection(TextEdit& e) {
 
 static void EditInsert(TextEdit& e, const std::wstring& s) {
     std::wstring add;
-    for (wchar_t c : s) if (c >= 32 && c != 127) add += c;      // 过滤控制字符
+    for (wchar_t c : s) if (c >= 32 && c != 127) add += c;      // Filter control characters.
     if (add.empty()) return;
     EditDeleteSelection(e);
     if (e.caret < 0) e.caret = 0;
@@ -1000,7 +1006,7 @@ static void EditInsert(TextEdit& e, const std::wstring& s) {
     e.clearSel();
 }
 
-// 前/后一个"字符"的位置（代理对一个字符，退格不会只吃半个 emoji）
+// Treat surrogate pairs as one character so Backspace cannot split an emoji.
 static int PrevPos(const std::wstring& s, int pos) {
     if (pos <= 0) return 0;
     int p = pos - 1;
@@ -1021,19 +1027,19 @@ static void EditPaste(TextEdit& e) {
     if (h) {
         const wchar_t* p = (const wchar_t*)GlobalLock(h);
         if (p) {
-            EditInsert(e, p);        // EditInsert 会过滤换行等控制字符
+            EditInsert(e, p);        // EditInsert filters newlines and other control characters.
             GlobalUnlock(h);
         }
     }
     CloseClipboard();
 }
 
-// vk：按键；shift：是否按住 Shift（扩展选择）
+// vk is the key; Shift extends the selection.
 static void EditKeyDown(TextEdit& e, WPARAM vk, bool shift) {
     int n = (int)e.text.size();
     auto move = [&](int to) {
         if (shift) {
-            if (!e.hasSel()) e.sel = e.caret;     // 开始扩展
+            if (!e.hasSel()) e.sel = e.caret;     // Start extending the selection.
             e.caret = to;
         } else {
             e.caret = to;
@@ -1065,7 +1071,7 @@ static void EditKeyDown(TextEdit& e, WPARAM vk, bool shift) {
     }
 }
 
-// 渲染用的字符串（把输入法预编辑串插在光标处）+ 光标在其中的位置
+// Build display text with IME preedit inserted at the caret, and return its displayed caret position.
 static std::wstring EditDisplay(const TextEdit& e, int* caretOut) {
     std::wstring s = e.text;
     int c = e.caret < 0 ? 0 : (e.caret > (int)e.text.size() ? (int)e.text.size() : e.caret);
@@ -1082,7 +1088,7 @@ static void EditSelectAll(TextEdit& e) {
     e.caret = (int)e.text.size();
 }
 
-// 按点击位置算光标（点击 = 取消选择）。x 是相对文本起点（已扣掉内边距）的距离
+// Place the caret from a click and clear selection; x excludes the field's left padding.
 static void EditSetCaretFromX(Gfx& g, TextEdit& e, float x) {
     if (e.text.empty()) { e.caret = 0; e.clearSel(); return; }
     int caretPos = 0;
@@ -1099,12 +1105,12 @@ static void EditSetCaretFromX(Gfx& g, TextEdit& e, float x) {
     int pos;
     if (bestI <= start) pos = bestI;
     else if (bestI >= start + pre) pos = bestI - pre;
-    else pos = start;                        // 落在预编辑串里：放到串前面
+    else pos = start;                        // A click inside preedit text places the caret before it.
     e.caret = pos;
     e.clearSel();
 }
 
-// 有输入框的弹层打开时：挂上输入法 + 开始光标闪烁（关掉时反过来）
+// Attach IME and start caret blinking when opening a text dialog; reverse on close.
 static void PrepareTextInput() {
     if (g_app.himc) ImmAssociateContext(g_app.hwnd, g_app.himc);
     g_app.caretOn = true;
@@ -1112,7 +1118,7 @@ static void PrepareTextInput() {
 }
 static void EndTextInput() {
     KillTimer(g_app.hwnd, TM_CARET);
-    ImmAssociateContext(g_app.hwnd, nullptr);      // 平时不挂输入法，免得随手按键弹候选窗
+    ImmAssociateContext(g_app.hwnd, nullptr);      // Detach IME outside editors so unrelated keystrokes do not open candidate windows.
 }
 
 static TextEdit* ActiveEdit() {
@@ -1124,7 +1130,7 @@ static bool AnyDialogOpen() {
     return g_app.addUI.active || g_app.delUI.active || g_app.renUI.active;
 }
 
-// 把输入法的候选窗贴到当前输入框下面
+// Position the IME candidate window below the active editor.
 static void ImeFollowEdit() {
     TextEdit* e = ActiveEdit();
     if (!e) return;
@@ -1145,7 +1151,7 @@ static void ImeFollowEdit() {
     ImmReleaseContext(g_app.hwnd, hImc);
 }
 
-// WM_IME_COMPOSITION：取"结果串"（确定上屏）与"预编辑串"（还没确定，自己画）
+// Read committed and preedit strings from WM_IME_COMPOSITION.
 static void ImeHandleComposition(LPARAM l) {
     TextEdit* e = ActiveEdit();
     if (!e) return;
@@ -1171,15 +1177,15 @@ static void ImeHandleComposition(LPARAM l) {
 }
 
 // ---------------------------------------------------------------------------
-//  文件对话框（系统的"打开文件"；只在点方框时弹，弹层本身不弹资源管理器）
+// Open a system file picker only when an image slot is clicked.
 // ---------------------------------------------------------------------------
 static bool PickImageFile(const std::wstring& title, std::wstring& outPath) {
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_IFileOpenDialog, (void**)&dlg)))
         return false;
-    COMDLG_FILTERSPEC filters[] = {{L"图片", L"*.jpg;*.jpeg;*.png;*.bmp"},
-                                   {L"所有文件", L"*.*"}};
+    COMDLG_FILTERSPEC filters[] = {{L"Images", L"*.jpg;*.jpeg;*.png;*.bmp"},
+                                   {L"All files", L"*.*"}};
     dlg->SetFileTypes(2, filters);
     dlg->SetFileTypeIndex(1);
     dlg->SetTitle(title.c_str());
@@ -1203,7 +1209,7 @@ static bool PickImageFile(const std::wstring& title, std::wstring& outPath) {
     return ok;
 }
 
-// 文件名（不含扩展名）——选完图后自动填进名字框（只在名字还空着时填）
+// Use the image filename without its extension as the initial name if the field is empty.
 static std::wstring FileBaseName(const std::wstring& path) {
     std::wstring s = path;
     size_t sl = s.find_last_of(L"\\/");
@@ -1214,7 +1220,7 @@ static std::wstring FileBaseName(const std::wstring& path) {
 }
 
 // ---------------------------------------------------------------------------
-//  添加主题弹层
+// Add theme dialog.
 // ---------------------------------------------------------------------------
 static void CloseAddTheme() {
     AddThemeUI& a = g_app.addUI;
@@ -1250,15 +1256,15 @@ static void OpenAddTheme() {
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
-// 点方框 → 弹文件对话框挑一张图；选完立刻出缩略图
+// Open an image picker and immediately display the selected thumbnail.
 static void PickAddThemeImage(bool light) {
     AddThemeUI& a = g_app.addUI;
     std::wstring path;
-    if (!PickImageFile(light ? L"选择浅色壁纸" : L"选择深色壁纸", path))
+    if (!PickImageFile(light ? L"Choose a light wallpaper" : L"Choose a dark wallpaper", path))
         return;
     ID2D1Bitmap* bmp = g_app.gfx.loadImage(path, 640);
     if (!bmp) {
-        a.hint = L"这张图片打不开（支持 jpg / png / bmp）";
+        a.hint = L"Cannot open this image. Use JPG, PNG, or BMP.";
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
@@ -1271,15 +1277,15 @@ static void PickAddThemeImage(bool light) {
         a.darkBmp = bmp;
         a.darkPath = path;
     }
-    if (TrimStr(a.name.text).empty()) {                 // 名字还空着就先填文件名
+    if (TrimStr(a.name.text).empty()) {                 // Prefill an empty name with the filename.
         a.name.text = FileBaseName(path);
         a.name.caret = (int)a.name.text.size();
         a.name.clearSel();
     }
-    // 校验 + 清错误提示
+    // Validate the image pair and clear stale errors.
     if (!a.lightPath.empty() && !a.darkPath.empty() &&
         _wcsicmp(a.lightPath.c_str(), a.darkPath.c_str()) == 0)
-        a.hint = L"浅色和深色必须是两张不同的图片";
+        a.hint = L"Choose different images for light and dark modes.";
     else
         a.hint.clear();
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -1289,22 +1295,22 @@ static void ConfirmAddTheme() {
     AddThemeUI& a = g_app.addUI;
     std::wstring nm = TrimStr(a.name.text);
     if (a.lightPath.empty() || a.darkPath.empty()) {
-        a.hint = L"请给浅色、深色各挑一张图片";
+        a.hint = L"Choose a light image and a dark image.";
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
     if (_wcsicmp(a.lightPath.c_str(), a.darkPath.c_str()) == 0) {
-        a.hint = L"浅色和深色必须是两张不同的图片";
+        a.hint = L"Choose different images for light and dark modes.";
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
     if (nm.empty()) {
-        a.hint = L"请给主题起个名字";
+        a.hint = L"Enter a theme name.";
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
-    // 名字形状的即时校验在弹层绘制里做过，这里再拦一道是给"回车确认"兜底：
-    // 非法名字以前会被 CreateDirectoryW 拒绝、却报成"目录不可写"
+    // Repeat live name validation for Enter-key confirmation, so invalid names receive a specific
+    // error instead of a misleading directory-write failure from CreateDirectoryW.
     std::wstring nameErr;
     if (!ThemeNameValid(nm, nameErr)) {
         a.hint = nameErr;
@@ -1313,7 +1319,7 @@ static void ConfirmAddTheme() {
     }
     std::wstring outName, err;
     if (!ImportTheme(nm, a.lightPath, a.darkPath, outName, &err)) {
-        a.hint = L"添加失败" + (err.empty() ? std::wstring(L"") : (L"：" + err));
+        a.hint = L"Could not add theme" + (err.empty() ? std::wstring(L"") : (L": " + err));
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
@@ -1326,15 +1332,15 @@ static void ConfirmAddTheme() {
     SaveConfig(g_app.cfg);
     ClearThumbs();
     ComputeLayout(g_app.L);
-    EnsureCardVisible(g_app.selIdx);     // 新主题若排在第二行之后，滚过去让它露出来
+    EnsureCardVisible(g_app.selIdx);     // Scroll the newly added theme into view if it is below the viewport.
     ApplyCurrent(true, true);
-    g_app.statusMsg = L"已添加主题：" + outName;
+    g_app.statusMsg = L"Theme added: " + outName;
     g_app.statusMsgUntil = GetTickCount64() + 6000;
     CloseAddTheme();
 }
 
 // ---------------------------------------------------------------------------
-//  主题重命名（卡片右上角"✎"打开）
+// Theme renaming via the card's rename action.
 // ---------------------------------------------------------------------------
 static void CloseRenameTheme() {
     RenameUI& r = g_app.renUI;
@@ -1372,7 +1378,7 @@ static void ConfirmRenameTheme() {
     std::wstring oldName = g_app.themes[r.idx].name;
     std::wstring folder = g_app.themes[r.idx].folder;
     std::wstring nm = TrimStr(r.name.text);
-    if (nm == oldName) { CloseRenameTheme(); return; }        // 没改就什么也不做
+    if (nm == oldName) { CloseRenameTheme(); return; }        // No action needed if the name is unchanged.
     std::wstring err;
     if (!RenameTheme(folder, nm, err)) {
         r.hint = err;
@@ -1390,13 +1396,13 @@ static void ConfirmRenameTheme() {
     ComputeLayout(g_app.L);
     EnsureCardVisible(g_app.selIdx);
     ApplyCurrent(true, true);
-    g_app.statusMsg = L"已重命名主题：" + oldName + L" → " + nm;
+    g_app.statusMsg = L"Theme renamed: " + oldName + L" → " + nm;
     g_app.statusMsgUntil = GetTickCount64() + 6000;
     CloseRenameTheme();
 }
 
 // ---------------------------------------------------------------------------
-//  删除主题确认框
+// Delete confirmation dialog.
 // ---------------------------------------------------------------------------
 static void OpenDelTheme(int idx) {
     if (idx < 0 || idx >= (int)g_app.themes.size()) return;
@@ -1420,17 +1426,17 @@ static void CloseDelTheme() {
 static void ConfirmDeleteTheme() {
     DelUI& d = g_app.delUI;
     if (d.idx < 0 || d.idx >= (int)g_app.themes.size()) { CloseDelTheme(); return; }
-    ThemeInfo t = g_app.themes[d.idx];       // 先拷一份，后面要重建列表
+    ThemeInfo t = g_app.themes[d.idx];       // Copy first because the theme list will be rebuilt.
     bool wasSelected = (d.idx == g_app.selIdx);
 
     std::wstring err;
     if (!DeleteThemeFolder(t.folder, err)) {
-        d.err = err;                         // 留在框里提示，用户可以直接取消
+        d.err = err;                         // Keep the dialog open with the error so the user can cancel.
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
 
-    // 重建主题列表，选中项挪到合理位置（删的在选中项前面时前移一位）
+    // Rebuild the list and adjust selection when an earlier theme was removed.
     g_app.themes = ScanThemes();
     int n = (int)g_app.themes.size();
     int sel = g_app.selIdx - (d.idx < g_app.selIdx ? 1 : 0);
@@ -1441,14 +1447,14 @@ static void ConfirmDeleteTheme() {
     SaveConfig(g_app.cfg);
     ClearThumbs();
     ComputeLayout(g_app.L);
-    if (wasSelected) ApplyCurrent(true, true);     // 删的正是当前主题：立刻切到下一个
+    if (wasSelected) ApplyCurrent(true, true);     // If deleting the selected theme, switch to the next one immediately.
 
-    g_app.statusMsg = L"已删除主题：" + t.name + L"（可在回收站里找回）";
+    g_app.statusMsg = L"Theme deleted: " + t.name + L" (restore it from the Recycle Bin)";
     g_app.statusMsgUntil = GetTickCount64() + 6000;
     CloseDelTheme();
 }
 
-// 等比铺满（cover）绘制缩略图
+// Draw a thumbnail using aspect-preserving cover scaling.
 static void DrawThumbCover(Gfx& g, ID2D1Bitmap* bmp, const D2D1_RECT_F& r, float radius,
                           const Palette& p) {
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(r, radius, radius);
@@ -1469,8 +1475,8 @@ static void DrawThumbCover(Gfx& g, ID2D1Bitmap* bmp, const D2D1_RECT_F& r, float
     g.strokeRound(rr, ColAlpha(p.textPrimary, 0.12f), 1.0f);
 }
 
-// 输入框：圆角底 + 边框（聚焦态用强调色）+ 文本 + 光标 + 占位符。
-// 文本比框宽时自动左移，光标始终留在框内。
+// Text field: rounded fill, focus-accent border, text, caret, and placeholder.
+// Scroll overflowing text horizontally to keep the caret visible.
 static void DrawTextEdit(Gfx& g, const D2D1_RECT_F& r, TextEdit& e, const Palette& p,
                          const std::wstring& placeholder, bool focused) {
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(r, 5, 5);
@@ -1490,7 +1496,7 @@ static void DrawTextEdit(Gfx& g, const D2D1_RECT_F& r, TextEdit& e, const Palett
         std::wstring disp = EditDisplay(e, &caretPos);
         float caretX = g.textWidth(disp.substr(0, caretPos), f);
         if (caretX > avail) shift = caretX - avail;
-        // 选中高亮：先画色块，再画文字（强调色的半透明底）
+        // Draw the translucent accent selection highlight before the text.
         if (e.hasSel()) {
             int a, b;
             e.selRange(a, b);
@@ -1516,7 +1522,7 @@ static void DrawTextEdit(Gfx& g, const D2D1_RECT_F& r, TextEdit& e, const Palett
     g.popClip();
 }
 
-// 选图方框：空 = 加号 + 提示；已选 = 图片（cover 铺满），悬停时压一层纱提示更换
+// Image slot: plus/prompt when empty, cover thumbnail when selected, change overlay on hover.
 static void DrawImageSlot(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* bmp, const std::wstring& hint,
                           const Palette& p, bool hot, bool pressed) {
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(r, 6, 6);
@@ -1526,7 +1532,7 @@ static void DrawImageSlot(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* bmp, const 
             g.fillRound(rr, Col(0, 0, 0, pressed ? 0.34f : 0.24f));
             IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                             DWRITE_TEXT_ALIGNMENT_CENTER);
-            g.textOptical(L"点击更换", f, D2D1::RectF(r.left, r.top, r.right, r.bottom),
+            g.textOptical(L"Click to change", f, D2D1::RectF(r.left, r.top, r.right, r.bottom),
                           Col(1, 1, 1, 0.95f), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
     } else {
@@ -1549,35 +1555,36 @@ static void DrawAddThemeOverlay(Gfx& g, const Palette& p) {
     UiDim(g, g_app.winWDip, g_app.winHDip, p);
     const Layout& L = g_app.L;
     AddThemeUI& a = g_app.addUI;
-    // 弹层卡片用不透明底色（半透明卡片会让背后内容透出来，像坏掉一样）
+    // Use an opaque dialog card so background controls do not show through.
     D2D1_ROUNDED_RECT card = D2D1::RoundedRect(L.ovCard, 8, 8);
     g.fillRound(card, p.dark ? ColHex(0x272727) : ColHex(0xFAFAFA));
     g.strokeRound(card, p.dark ? Col(1, 1, 1, 0.10f) : Col(0, 0, 0, 0.08f), 1.0f);
 
     IDWriteTextFormat* fTitle = g.format(FONT_UI, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    IDWriteTextFormat* fSub   = g.format(FONT_UI, 12.5f);
+    IDWriteTextFormat* fSub   = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_NORMAL,
+                                       DWRITE_TEXT_ALIGNMENT_LEADING, true);
     IDWriteTextFormat* fLabel = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     float x0 = L.ovCard.left + 24, x1 = L.ovCard.right - 24;
 
-    g.textOptical(L"添加主题", fTitle, D2D1::RectF(x0, L.ovCard.top + 20, x1, L.ovCard.top + 50),
+    g.textOptical(L"Add theme", fTitle, D2D1::RectF(x0, L.ovCard.top + 20, x1, L.ovCard.top + 50),
                   p.textPrimary);
-    g.textOptical(L"主题名称", fLabel, D2D1::RectF(x0, L.ovCard.top + 54, x1, L.ovCard.top + 74),
+    g.textOptical(L"Theme name", fLabel, D2D1::RectF(x0, L.ovCard.top + 54, x1, L.ovCard.top + 74),
                   p.textSecondary);
-    DrawTextEdit(g, L.ovName, a.name, p, L"例如：沙漠、海边日出…", true);
+    DrawTextEdit(g, L.ovName, a.name, p, L"e.g. Desert, Sunrise...", true);
 
     auto caption = [&](const D2D1_RECT_F& slot, const wchar_t* t) {
         g.textOptical(t, fLabel, D2D1::RectF(slot.left, slot.top - 22, slot.right, slot.top - 2),
                       p.textSecondary);
     };
-    caption(L.ovLightSlot, L"浅色");
-    caption(L.ovDarkSlot, L"深色");
-    DrawImageSlot(g, L.ovLightSlot, a.lightBmp, L"点击选择浅色壁纸", p,
+    caption(L.ovLightSlot, L"Light");
+    caption(L.ovDarkSlot, L"Dark");
+    DrawImageSlot(g, L.ovLightSlot, a.lightBmp, L"Choose light image", p,
                   g_app.hot == CID_OV_LIGHT_SLOT, g_app.pressed == CID_OV_LIGHT_SLOT);
-    DrawImageSlot(g, L.ovDarkSlot, a.darkBmp, L"点击选择深色壁纸", p,
+    DrawImageSlot(g, L.ovDarkSlot, a.darkBmp, L"Choose dark image", p,
                   g_app.hot == CID_OV_DARK_SLOT, g_app.pressed == CID_OV_DARK_SLOT);
 
-    // 底部提示：出错用强调色；就绪时写明将要保存到哪里。
-    // 名字即时校验每帧做（纯字符串判断）：非法字符当场提示并禁用「添加」
+    // Bottom hint: accent color on error; otherwise show the destination directory.
+    // Validate the name each frame with pure string checks; disable Add for invalid names.
     std::wstring nm = TrimStr(a.name.text);
     std::wstring nameErr;
     bool nameOk = nm.empty() || ThemeNameValid(nm, nameErr);
@@ -1591,18 +1598,18 @@ static void DrawAddThemeOverlay(Gfx& g, const Palette& p) {
     else if (!nameOk) { hint = nameErr; hintIsError = true; }
     else if (ready) {
         std::wstring dir = UserThemeDir(), exe = ExeDir(), shown = dir;
-        if (!exe.empty() && dir.rfind(exe, 0) == 0)          // 在程序目录里显示成相对形式
-            shown = L"程序目录" + dir.substr(exe.size());
-        hint = L"将这两张图片复制到 " + shown + L"\\" + nm +
-               L"\\（之后与原始图片位置无关）";
+        if (!exe.empty() && dir.rfind(exe, 0) == 0)          // Show a relative path when the destination is inside the app directory.
+            shown = L"App directory" + dir.substr(exe.size());
+        hint = L"Copy both images to " + shown + L"\\" + nm +
+               L"\\ (originals remain unchanged)";
     }
     if (!hint.empty())
-        g.textOptical(hint, fSub, D2D1::RectF(x0, L.ovCard.bottom - 96, x1, L.ovCard.bottom - 72),
+        g.text(hint, fSub, D2D1::RectF(x0, L.ovCard.bottom - 120, x1, L.ovCard.bottom - 68),
                       hintIsError ? p.accentText : p.textSecondary);
 
-    UiButton(g, L.ovCancel, L"取消", p, false, g_app.hot == CID_OV_CANCEL,
+    UiButton(g, L.ovCancel, L"Cancel", p, false, g_app.hot == CID_OV_CANCEL,
              g_app.pressed == CID_OV_CANCEL);
-    UiButton(g, L.ovOk, L"添加", p, true, g_app.hot == CID_OV_OK, g_app.pressed == CID_OV_OK,
+    UiButton(g, L.ovOk, L"Add", p, true, g_app.hot == CID_OV_OK, g_app.pressed == CID_OV_OK,
              ready, L"\uE710");
 }
 
@@ -1620,28 +1627,29 @@ static void DrawRenameDialog(Gfx& g, const Palette& p) {
         folder = g_app.themes[r.idx].folder;
     }
     IDWriteTextFormat* fTitle = g.format(FONT_UI, 16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    IDWriteTextFormat* fSub   = g.format(FONT_UI, 12.5f);
+    IDWriteTextFormat* fSub   = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_NORMAL,
+                                       DWRITE_TEXT_ALIGNMENT_LEADING, true);
     IDWriteTextFormat* fPath  = g.format(FONT_UI, 11.0f);
     float x0 = L.renCard.left + 24, x1 = L.renCard.right - 24;
 
-    g.textOptical(L"重命名主题「" + oldName + L"」", fTitle,
+    g.textOptical(L"Rename theme: " + oldName, fTitle,
                   D2D1::RectF(x0, L.renCard.top + 20, x1, L.renCard.top + 48), p.textPrimary);
-    g.textOptical(L"改的是名字（文件夹会一起改名），主题里的图片不会动。", fSub,
+    g.textOptical(L"Renames the folder; images stay unchanged.", fSub,
                   D2D1::RectF(x0, L.renCard.top + 54, x1, L.renCard.top + 76), p.textSecondary);
-    // 路径显示成"程序目录\..."的短形式（长路径会被卡片截断）
+    // Shorten app-relative paths to avoid clipping long absolute paths.
     std::wstring shown = folder;
     std::wstring exe = ExeDir();
-    if (!exe.empty() && folder.rfind(exe, 0) == 0) shown = L"程序目录" + folder.substr(exe.size());
+    if (!exe.empty() && folder.rfind(exe, 0) == 0) shown = L"App directory" + folder.substr(exe.size());
     g.textOptical(shown, fPath, D2D1::RectF(x0, L.renCard.top + 78, x1, L.renCard.top + 98),
                   p.textTertiary);
-    DrawTextEdit(g, L.renField, r.name, p, L"新名称", true);
+    DrawTextEdit(g, L.renField, r.name, p, L"New name", true);
     if (!r.hint.empty()) {
-        g.textOptical(r.hint, fSub, D2D1::RectF(x0, L.renCard.top + 146, x1, L.renCard.top + 170),
+        g.text(r.hint, fSub, D2D1::RectF(x0, L.renCard.top + 146, x1, L.renCard.top + 198),
                       p.accentText);
     }
-    UiButton(g, L.renCancel, L"取消", p, false, g_app.hot == CID_REN_CANCEL,
+    UiButton(g, L.renCancel, L"Cancel", p, false, g_app.hot == CID_REN_CANCEL,
              g_app.pressed == CID_REN_CANCEL);
-    UiButton(g, L.renOk, L"保存", p, true, g_app.hot == CID_REN_OK, g_app.pressed == CID_REN_OK,
+    UiButton(g, L.renOk, L"Save", p, true, g_app.hot == CID_REN_OK, g_app.pressed == CID_REN_OK,
              !TrimStr(r.name.text).empty());
 }
 
@@ -1665,37 +1673,37 @@ static void DrawDelThemeDialog(Gfx& g, const Palette& p) {
                                          DWRITE_TEXT_ALIGNMENT_LEADING, true);
     float x0 = L.dlgCard.left + 24, x1 = L.dlgCard.right - 24, y0 = L.dlgCard.top;
 
-    g.textOptical(L"删除主题「" + name + L"」？", fTitle,
+    g.textOptical(L"Delete theme: " + name + L"?", fTitle,
                   D2D1::RectF(x0, y0 + 20, x1, y0 + 48), p.textPrimary);
-    g.text(L"主题文件夹会被移到回收站（可从回收站拖回来恢复），不会影响你的原始图片。",
+    g.text(L"Move this theme to the Recycle Bin. You can restore it later. Original images stay unchanged.",
            fBody, D2D1::RectF(x0, y0 + 56, x1, y0 + 92), p.textSecondary);
     g.text(folder, fPath, D2D1::RectF(x0, y0 + 92, x1, y0 + 132), p.textTertiary);
     if (!d.err.empty()) {
         IDWriteTextFormat* fErr = g.format(FONT_UI, 12.0f, DWRITE_FONT_WEIGHT_NORMAL,
                                            DWRITE_TEXT_ALIGNMENT_LEADING, true);
-        g.textOptical(d.err, fErr, D2D1::RectF(x0, y0 + 132, x1, y0 + 156), ColHex(0xC42B1C));
+        g.text(d.err, fErr, D2D1::RectF(x0, y0 + 132, x1, y0 + 184), ColHex(0xC42B1C));
     }
 
-    UiButton(g, L.dlgCancel, L"取消", p, false, g_app.hot == CID_DLG_CANCEL,
+    UiButton(g, L.dlgCancel, L"Cancel", p, false, g_app.hot == CID_DLG_CANCEL,
              g_app.pressed == CID_DLG_CANCEL);
-    // 删除用"危险色"按钮（临时替换调色板里的强调色）
+    // Use a temporary danger-accent palette for the Delete button.
     Palette pd = p;
     pd.accent        = ColHex(0xC42B1C);
     pd.accentHover   = ColHex(0xD13A2B);
     pd.accentPressed = ColHex(0xA82318);
     pd.textOnAccent  = Col(1, 1, 1, 1);
-    UiButton(g, L.dlgOk, L"删除", pd, true, g_app.hot == CID_DLG_OK, g_app.pressed == CID_DLG_OK);
+    UiButton(g, L.dlgOk, L"Delete", pd, true, g_app.hot == CID_DLG_OK, g_app.pressed == CID_DLG_OK);
 }
 
 // ---------------------------------------------------------------------------
-//  窗口底色
+// Window backdrop.
 //
-//  Win11 22H2+：DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE = 3)，DWM 实时
-//  模糊窗口背后的所有内容（含其他窗口）。前提：客户区真的透明（不能铺不透明底），
-//  窗口必须带 WS_EX_NOREDIRECTIONBITMAP。
-//  Win10：纯色底（跟随深浅色）。AccentPolicy 亚克力拖动时模糊滞后、自绘磨砂只是
-//  模拟壁纸，都不如纯色干净。
-//  --self-glass 强制自绘磨砂（DrawGlassBackdrop），--opaque 强制不透明渐变。
+// On Windows 11 22H2+, DWMWA_SYSTEMBACKDROP_TYPE=3 blurs content behind the window live.
+// The client area must remain transparent to reveal DWM's backdrop,
+// and the window must have WS_EX_NOREDIRECTIONBITMAP.
+// Windows 10 uses a solid theme-aware background; AccentPolicy acrylic lags during dragging,
+// and wallpaper-based simulated blur cannot reflect other windows.
+// --self-glass forces DrawGlassBackdrop; --opaque uses an opaque gradient.
 // ---------------------------------------------------------------------------
 static bool IsWin11_22H2OrLater() {
     typedef LONG (WINAPI* PFN_RtlGetVersion)(PRTL_OSVERSIONINFOW);
@@ -1710,19 +1718,19 @@ static bool IsWin11_22H2OrLater() {
            (vi.dwMajorVersion == 10 && vi.dwBuildNumber >= 22621);
 }
 
-// 自绘磨砂：把当前壁纸缩到约 1/16 再放大铺满窗口（缩小再放大即模糊），
-// 上面叠色调纱 + 淡颗粒噪点。壁纸按"填充(cover)"映射到屏幕坐标——窗口移动时
-// 看到的是它背后那一块壁纸；壁纸换了（本程序切主题、或系统里换）约 1.5 秒内重采。
+// Simulate frosted glass by downsampling the wallpaper to roughly 1/16 then enlarging it,
+// with a tint and subtle noise. Map the wallpaper in cover mode to screen coordinates,
+// and resample changes within about 1.5 seconds so window movement reveals the matching area.
 struct Glass {
-    std::wstring path;                      // 已加载的壁纸路径
-    ID2D1Bitmap* small = nullptr;           // 缩小版壁纸（模糊源）
-    ID2D1Bitmap* noise = nullptr;           // 颗粒噪点（128×128，循环铺）
+    std::wstring path;                      // Loaded wallpaper path.
+    ID2D1Bitmap* small = nullptr;           // Downsampled wallpaper used as the blur source.
+    ID2D1Bitmap* noise = nullptr;           // Tiled 128x128 noise texture.
     ID2D1BitmapBrush* noiseBrush = nullptr;
     int screenW = 0, screenH = 0;
 };
 static Glass g_glass;
 
-// 毛玻璃浓度：alpha 越小越"透"，越大越"雾"
+// Lower alpha is clearer; higher alpha produces a stronger frosted tint.
 static D2D1_COLOR_F GlassVeil(const Palette& p) {
     return p.dark ? Col(0.05f, 0.05f, 0.06f, 0.38f)
                   : Col(1.0f, 1.0f, 1.0f, 0.46f);
@@ -1732,7 +1740,7 @@ static void EnsureGlassBitmap(bool force = false) {
     if (!g_app.gfx.dc()) return;
     static ULONGLONG lastCheck = 0;
     ULONGLONG now = GetTickCount64();
-    if (!force && now - lastCheck < 1500) return;   // 注册表最多 1.5 秒查一次
+    if (!force && now - lastCheck < 1500) return;   // Read the registry at most once every 1.5 seconds.
     lastCheck = now;
     std::wstring wp = CurrentWallpaperPath();
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
@@ -1743,12 +1751,12 @@ static void EnsureGlassBitmap(bool force = false) {
     g_glass.screenW = sw;
     g_glass.screenH = sh;
     if (wp.empty()) return;
-    int smallW = sw / 16;                           // 缩得越小越模糊
+    int smallW = sw / 16;                           // Smaller source images produce stronger blur.
     if (smallW < 48) smallW = 48;
     g_glass.small = g_app.gfx.loadImage(wp, (UINT)smallW);
 }
 
-// 颗粒：固定种子，深/浅两种极淡的小点交替（预乘 alpha 0~13）
+// Fixed-seed noise with alternating subtle light/dark pixels and premultiplied alpha 0..13.
 static void EnsureGlassNoise(Gfx& g) {
     if (g_glass.noiseBrush) return;
     const int N = 128;
@@ -1774,7 +1782,7 @@ static void DrawGlassBackdrop(Gfx& g, const Palette& p) {
     const float w = g_app.winWDip, h = g_app.winHDip;
     EnsureGlassBitmap();
     if (g_glass.small) {
-        // 壁纸按 cover 铺满屏幕：把窗口的屏幕矩形映射回位图坐标
+        // Map the window's screen rectangle back into the wallpaper's cover-scaled bitmap.
         D2D1_SIZE_F bm = g_glass.small->GetSize();
         float sw = (float)g_glass.screenW, sh = (float)g_glass.screenH;
         if (bm.width > 0 && bm.height > 0) {
@@ -1790,12 +1798,12 @@ static void DrawGlassBackdrop(Gfx& g, const Palette& p) {
                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src);
         }
     } else {
-        // 取不到壁纸（纯色桌面）：退回纯色底
+        // Use a solid fill if there is no wallpaper, such as a solid-color desktop.
         g.dc()->Clear(p.dark ? ColHex(0x1C1C1C) : ColHex(0xF3F3F3));
     }
-    // 色调纱：保证上层文字/控件的可读性
+    // Tint preserves text and control readability.
     g.dc()->FillRectangle(D2D1::RectF(0, 0, w, h), g.brush(GlassVeil(p)));
-    // 颗粒锚在屏幕上（拖动窗口时颗粒不"跟着滑"，和系统亚克力的手感一致）
+    // Anchor noise to the screen so it does not slide with the dragged window.
     EnsureGlassNoise(g);
     if (g_glass.noiseBrush) {
         RECT wr;
@@ -1808,8 +1816,8 @@ static void DrawGlassBackdrop(Gfx& g, const Palette& p) {
     }
 }
 
-// 滚动条：右侧一根细滑块（WinUI 风格），滚动时出现，停手约 1 秒后淡出。
-// 轨道本身不画（和 Win11 一致），鼠标停在滑块上会加浓一点。
+// WinUI-style thin scrollbar appears on scroll and fades after roughly one second of inactivity.
+// Do not draw the track; increase thumb opacity on hover, as on Windows 11.
 static void DrawScrollbar(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     if (L.maxScroll <= 0.0f || g_app.sbAlpha <= 0.01f) return;
@@ -1824,14 +1832,14 @@ static void RenderFrame() {
     Gfx& g = g_app.gfx;
     if (!g.dc()) return;
     const Palette& p = g_app.pal;
-    SyncThumbs();                            // 可能释放/新建 D2D 位图，放在 begin 之前
+    SyncThumbs();                            // Thumbnail synchronization may create/release D2D bitmaps, so run it before begin().
     if (!g.begin()) return;
     g.dc()->Clear(Col(0, 0, 0, 0));
 
-    // 窗口动画：整体淡入淡出 + 由下方轻推入（winAnim: 0=透明 1=完全显示）
+    // Window animation: opacity and a slight upward slide; winAnim 0=hidden, 1=fully visible.
     float frameAlpha = g_app.winAnim;
     bool useLayer = frameAlpha < 0.999f;
-    float baseTy = 0.0f;                     // 内容整体的竖直偏移（淡入轻推 + 滚动）
+    float baseTy = 0.0f;                     // Vertical content offset combines the entrance slide and page scroll.
     if (useLayer) {
         if (!g_app.uiLayer) g.dc()->CreateLayer(nullptr, &g_app.uiLayer);
         if (g_app.uiLayer) {
@@ -1846,9 +1854,9 @@ static void RenderFrame() {
     }
     g_app.frameLayerPushed = useLayer;
 
-    // 窗口底色：系统亚克力 / 自绘磨砂 / 不透明渐变
+    // Backdrop: system acrylic, custom frosted glass, or opaque gradient.
     if (g_app.liveGlass) {
-        // 客户区必须真的透明，DWM 的模糊才透得上来；再叠一层薄色调纱保证文字可读
+        // Keep the client transparent for DWM blur, then add a thin tint for readability.
         g.dc()->Clear(Col(0, 0, 0, 0));
         D2D1_COLOR_F veil = p.dark ? Col(0.04f, 0.04f, 0.05f, 0.32f)
                                    : Col(1.0f, 1.0f, 1.0f, 0.40f);
@@ -1856,7 +1864,7 @@ static void RenderFrame() {
     } else if (g_app.glass) {
         DrawGlassBackdrop(g, p);
     } else if (g_app.solidBg) {
-        // Win10 默认：不模糊，一块跟随深浅色的纯色（浅 0xF3F3F3 / 深 0x202020）
+        // Windows 10 default: solid theme color, light 0xF3F3F3 or dark 0x202020.
         g.dc()->Clear(p.windowBgTop);
     } else {
         if (!g_app.bgBrush) {
@@ -1876,7 +1884,7 @@ static void RenderFrame() {
             g.dc()->Clear(p.windowBgTop);
     }
 
-    // 内容区：裁剪到标题栏以下 + 按滚动量整体上移（标题栏与弹层不参与滚动）
+    // Clip below the title bar and translate by scroll; title bar and dialogs stay fixed.
     g.dc()->PushAxisAlignedClip(
         D2D1::RectF(0, Ui::TitleBarH, g_app.winWDip, g_app.winHDip),
         D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1889,8 +1897,8 @@ static void RenderFrame() {
     DrawOptions(g, p);
     DrawStatus(g, p);
 
-    // 底部按钮（主题/时间/开关一改就自动应用，"立即应用"只在托盘菜单里）
-    UiButton(g, g_app.L.openThemesBtn, L"打开主题文件夹", p, false,
+    // Bottom action; settings apply automatically, while Apply now is available in the tray menu.
+    UiButton(g, g_app.L.openThemesBtn, L"Open themes folder", p, false,
              g_app.hot == CID_OPENTHEMES, g_app.pressed == CID_OPENTHEMES, true, L"\uE838");
 
     g.dc()->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -1901,7 +1909,7 @@ static void RenderFrame() {
 
     if (g_app.delUI.active) DrawDelThemeDialog(g, p);
     if (g_app.renUI.active) DrawRenameDialog(g, p);
-    if (g_app.addUI.active) DrawAddThemeOverlay(g, p);   // 添加弹层盖在最上面
+    if (g_app.addUI.active) DrawAddThemeOverlay(g, p);   // Draw modal dialogs above all other content.
 
     if (useLayer) {
         g.dc()->PopLayer();
@@ -1911,28 +1919,28 @@ static void RenderFrame() {
 }
 
 // ---------------------------------------------------------------------------
-//  托盘
+// System tray.
 // ---------------------------------------------------------------------------
 static void TrayMenu() {
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, 1, L"显示主界面");
-    AppendMenuW(m, MF_STRING, 2, L"立即应用当前壁纸");
+    AppendMenuW(m, MF_STRING, 1, L"Show window");
+    AppendMenuW(m, MF_STRING, 2, L"Apply now");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_app.cfg.autoSwitch ? MF_CHECKED : 0), 3, L"自动切换壁纸");
-    // 切换方式二级菜单（与主界面的"切换方式"分段控件同一个设置）
+    AppendMenuW(m, MF_STRING | (g_app.cfg.autoSwitch ? MF_CHECKED : 0), 3, L"Switch wallpapers automatically");
+    // Switch-mode submenu shares the main window's setting.
     HMENU swmode = CreatePopupMenu();
-    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 0 ? MF_CHECKED : 0), 21, L"按时段");
-    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 1 ? MF_CHECKED : 0), 22, L"跟随系统深浅色");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)swmode, L"切换方式");
-    AppendMenuW(m, MF_STRING | (g_app.cfg.startOnBoot ? MF_CHECKED : 0), 4, L"开机自动启动");
-    // 外观二级菜单（与主界面的"外观"区域同一个设置）
+    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 0 ? MF_CHECKED : 0), 21, L"Schedule");
+    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 1 ? MF_CHECKED : 0), 22, L"Follow system theme");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)swmode, L"Switch mode");
+    AppendMenuW(m, MF_STRING | (g_app.cfg.startOnBoot ? MF_CHECKED : 0), 4, L"Start with Windows");
+    // Appearance submenu shares the main window's setting.
     HMENU appearance = CreatePopupMenu();
-    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 0 ? MF_CHECKED : 0), 11, L"跟随系统");
-    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 1 ? MF_CHECKED : 0), 12, L"浅色");
-    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 2 ? MF_CHECKED : 0), 13, L"深色");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)appearance, L"外观");
+    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 0 ? MF_CHECKED : 0), 11, L"System");
+    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 1 ? MF_CHECKED : 0), 12, L"Light");
+    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 2 ? MF_CHECKED : 0), 13, L"Dark");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)appearance, L"Appearance");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, 9, L"退出");
+    AppendMenuW(m, MF_STRING, 9, L"Quit");
     SetForegroundWindow(g_app.hwnd);
     POINT pt;
     GetCursorPos(&pt);
@@ -1978,8 +1986,8 @@ static void TrayMenu() {
     }
 }
 
-// Explorer 重启会广播 "TaskbarCreated"：托盘图标挂在旧任务栏上会随它消失，
-// 收到这条消息必须自己把图标加回来。
+// Explorer broadcasts TaskbarCreated after restarting, which removes icons from the old tray.
+// Re-add the tray icon when receiving this message.
 static UINT g_taskbarCreatedMsg = 0;
 
 static void AddTrayIcon() {
@@ -1989,8 +1997,8 @@ static void AddTrayIcon() {
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_APP + 2;
-    // 托盘图标清晰度：按系统小图标尺寸（随 DPI 变化，200% 缩放下是 32×32）取图，
-    // 固定 16×16 会被系统放大而发虚。句柄只加载一次：每次新建不销毁会漏 GDI 句柄
+    // Load at the DPI-aware small-icon size (32x32 at 200%) to avoid blurry upscaling.
+    // Reuse the handle to avoid leaking GDI resources when the tray icon is re-added.
     if (!g_app.trayIcon) {
         int cx = GetSystemMetrics(SM_CXSMICON);
         int cy = GetSystemMetrics(SM_CYSMICON);
@@ -2018,7 +2026,7 @@ static void RemoveTrayIcon() {
 }
 
 // ---------------------------------------------------------------------------
-//  缩略图 / 调色板
+// Thumbnails and palette.
 // ---------------------------------------------------------------------------
 static void ClearThumbs() {
     g_thumbLoader.cancel(++g_thumbGeneration);
@@ -2028,12 +2036,12 @@ static void ClearThumbs() {
     g_app.thumbTried.clear();
 }
 
-// 只保留"视口内 + 上下各一行缓冲"的缩略图：主题多时不占内存，
-// 滚动到哪儿解到哪儿，解码交给后台线程，GPU 位图仍在界面线程创建。
+// Keep only visible thumbnails plus a buffer row above and below to bound memory use.
+// Decode on the background thread; create GPU bitmaps on the UI thread.
 static void SyncThumbs() {
     Layout& L = g_app.L;
     const int n = (int)g_app.themes.size();
-    if ((int)g_app.thumbs.size() != n) {     // 主题列表变了（增/删/改名/重扫）
+    if ((int)g_app.thumbs.size() != n) {     // Theme list changed after add, delete, rename, or rescan.
         ClearThumbs();
         g_app.thumbs.assign(n, nullptr);
         g_app.thumbTried.assign(n, 0);
@@ -2044,7 +2052,7 @@ static void SyncThumbs() {
         return;
     }
     VisibleCardRange(L, g_app.scroll, L.firstVis, L.lastVis);
-    if (L.lastVis < L.firstVis) {            // 一张卡片都不在视口里
+    if (L.lastVis < L.firstVis) {            // No cards intersect the viewport.
         L.firstVis = 0;
         L.lastVis = -1;
     }
@@ -2060,7 +2068,7 @@ static void SyncThumbs() {
         }
     }
     std::vector<ThumbRequest> requests;
-    // 可见卡片优先，缓冲行稍后解码。
+    // Decode visible cards before buffer rows.
     for (int i = L.firstVis; i <= L.lastVis; ++i) {
         if (i < 0 || i >= n) continue;
         if (!g_app.thumbs[i] && !g_app.thumbTried[i])
@@ -2075,7 +2083,7 @@ static void SyncThumbs() {
     g_thumbLoader.submit(g_app.hwnd, kThumbReadyMessage, g_thumbGeneration, std::move(requests));
 }
 
-// 外观 0=跟随系统 1=浅色 2=深色
+// Appearance: 0=system, 1=light, 2=dark.
 static void RefreshPalette() {
     bool dark = g_app.cfg.appearance == 2
                     ? true
@@ -2086,30 +2094,30 @@ static void RefreshPalette() {
 }
 
 // ---------------------------------------------------------------------------
-//  动画
+// Animation.
 // ---------------------------------------------------------------------------
-// 动画时间基准用 QPC（µs 级）。GetTickCount64 只有 ~15.6ms 粒度
-//（timeBeginPeriod(1) 也提不高它），用它插值动画位置会隔 2~3 个刷新周期才更新
-// 一次、步长不匀——120Hz 屏上看着一顿一顿。
+// Use QPC for sub-millisecond animation timing. GetTickCount64 has roughly 15.6 ms granularity,
+// which timeBeginPeriod(1) does not improve; interpolating with it skips 2-3 display refreshes
+// at a time and creates uneven motion on a 120 Hz screen.
 static double qpcMs() {
     static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
     return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
-static int g_paintCount = 0;        // TW_ANIMLOG 调试钩子用：WM_PAINT 次数
-static double g_lastFrameEnd = 0;   // TW_ANIMLOG 调试钩子用：上一帧结束的 QPC 时间
+static int g_paintCount = 0;        // WM_PAINT count for the TW_ANIMLOG diagnostic hook.
+static double g_lastFrameEnd = 0;   // QPC time at the end of the last frame for TW_ANIMLOG.
 
 static void StartAnim() {
     if (!g_app.gfx.dc() || !IsWindowVisible(g_app.hwnd)) return;
-    // 开关/分段控件/窗口淡入淡出按实际经过时间插值，8ms 定时器足够。
-    // 全屏切换动画不走这个定时器：StartZoom() 直接调用 RunZoomAnim() 一口气跑完、
-    // 用 DwmFlush() 自控节奏（WM_TIMER 最小间隔 ~15.6ms 会砍到 64fps）。
+    // Interpolate toggles, segments, and fades using elapsed time; an 8 ms timer is sufficient.
+    // Zoom animation instead runs synchronously in RunZoomAnim from StartZoom,
+    // paced by DwmFlush so WM_TIMER granularity does not cap it near 64 fps.
     if (SetTimer(g_app.hwnd, TM_ANIM, 8, nullptr)) g_animTimerPrecision.acquire();
 }
 
-// WINDOWPLACEMENT 的 rcNormalPosition 用"工作区坐标"（原点 = 所在显示器 rcWork
-// 左上角），GetWindowRect 拿的是屏幕坐标，两者差一个工作区原点——不换算还原会
-// 整体偏移（如任务栏高度 76px）。
+// WINDOWPLACEMENT rcNormalPosition uses workspace coordinates, while GetWindowRect uses
+// screen coordinates. Convert between them to avoid a restore offset,
+// such as the 76px taskbar height.
 static RECT ScreenToWorkArea(const RECT& r) {
     RECT w = r;
     MONITORINFO mi = {sizeof(mi)};
@@ -2129,21 +2137,21 @@ static RECT WorkAreaToScreen(const RECT& w, HWND h) {
     return r;
 }
 
-// 全屏切换动画的收尾：真正切到最大化/还原状态（此刻窗口矩形已与目标一致，
-// 不会跳）。SetWindowPlacement 只拿来改系统里的"还原矩形"记录，切状态一律用
-// ShowWindow 单步完成——直接 SetWindowPlacement(目标状态) 会被系统做成两步
-//（先按 rcNormalPosition 摆一次再切状态），收尾时窗口会"弹"回去又弹回来。
+// Finalize maximize/restore only after the animated rectangle reaches the target.
+// Use SetWindowPlacement only to update the saved restore rectangle, and ShowWindow
+// to change state in one step. Changing both through SetWindowPlacement can first move
+// to rcNormalPosition and then change state, causing a visible jump.
 //
-// 两个方向的顺序必须相反，关键在 rcNormalPosition 的语义：
-//   · 窗口处于最大化态时它只是"还原位置"记录，写进去屏幕零变化；
-//   · 窗口处于普通态时它就是窗口的活位置，写进去系统会真的把窗口挪过去。
-// 所以：
-//   · 去最大化：先 SW_MAXIMIZE（此刻窗口已被动画摆到最大化矩形，切状态不动
-//     矩形，零视觉变化），变成最大化态后再补写 rcNormalPosition（纯数据修改）。
-//     反过来的顺序会让窗口先闪回旧位置再被放大（实测复现过）。
-//   · 还原：窗口是最大化态，先写 rcNormalPosition（纯数据修改），再 SW_RESTORE。
-// DWMWA_TRANSITIONS_FORCEDISABLED 关掉本窗口的 DWM 过渡：否则 DWM 会替这个
-// 窗口再播一遍系统自带的"最大化/还原"视觉动画（一层视觉变换，能看到收尾弹一下）。
+// The two directions need opposite ordering because rcNormalPosition changes meaning:
+// while maximized, it is only a saved restore position and causes no visible movement;
+// while restored, it is the live window position and writing it moves the window.
+// Therefore:
+// To maximize, first call SW_MAXIMIZE after the animation has reached the work area,
+// then write rcNormalPosition while maximized, which changes only saved data.
+// Reversing that order flashes back to the old position before maximizing.
+// To restore, write rcNormalPosition while maximized, then call SW_RESTORE.
+// DWMWA_TRANSITIONS_FORCEDISABLED prevents DWM from adding a second maximize/restore
+// animation after the custom transition, which would cause a visible final bounce.
 #ifndef DWMWA_TRANSITIONS_FORCEDISABLED
 #define DWMWA_TRANSITIONS_FORCEDISABLED 3
 #endif
@@ -2157,14 +2165,14 @@ static void ApplyZoomState(bool toMax) {
     if (toMax) {
         ShowWindow(g_app.hwnd, SW_MAXIMIZE);
         if (g_app.normRect.right > g_app.normRect.left && GetWindowPlacement(g_app.hwnd, &wp)) {
-            wp.showCmd = SW_SHOWMAXIMIZED;               // = 当前状态 → 纯数据修改
+            wp.showCmd = SW_SHOWMAXIMIZED;               // Keep the current state so only saved placement data changes.
             wp.flags = 0;
             wp.rcNormalPosition = ScreenToWorkArea(g_app.normRect);
             SetWindowPlacement(g_app.hwnd, &wp);
         }
     } else {
         if (GetWindowPlacement(g_app.hwnd, &wp)) {
-            wp.showCmd = IsZoomed(g_app.hwnd) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;  // = 当前状态
+            wp.showCmd = IsZoomed(g_app.hwnd) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;  // Keep the current state.
             wp.flags = 0;
             if (g_app.normRect.right > g_app.normRect.left)
                 wp.rcNormalPosition = ScreenToWorkArea(g_app.normRect);
@@ -2172,23 +2180,23 @@ static void ApplyZoomState(bool toMax) {
         }
         ShowWindow(g_app.hwnd, SW_RESTORE);
         if (g_app.normRect.right > g_app.normRect.left) {
-            // 收尾后立刻把追踪值钉回目标，避免放置过程的中间帧污染它
+            // Restore the tracked target immediately to discard intermediate placement frames.
             g_app.zooming = false;
             TrackNormRect();
         }
     }
     noTrans = FALSE;
     DwmSetWindowAttribute(g_app.hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &noTrans, sizeof(noTrans));
-    // 收尾定圆角：最大化 = 直角（圆角会在屏幕四角露出桌面），还原 = 圆角。
-    // 矩形不变时系统也可能不发 WM_SIZE，必须在状态切完的这一刻显式定死。
+    // Use square corners when maximized and rounded corners when restored.
+    // Set this explicitly after the state change because an unchanged rectangle may not trigger WM_SIZE.
     int corner = toMax ? 1 /*DONOTROUND*/ : 2 /*ROUND*/;
     DwmSetWindowAttribute(g_app.hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
     g_app.zooming = false;
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
-// 记住"普通状态"下的窗口矩形（还原动画用）。缩放动画进行中、最大化、最小化时
-// 不记，否则会把动画中间帧或满屏矩形当成还原目标。
+// Remember the normal window rectangle for restore animations; ignore zoom, maximize,
+// and minimize states so intermediate/fullscreen rectangles do not overwrite it.
 static void TrackNormRect() {
     if (g_app.zooming || g_app.maximized) return;
     if (IsZoomed(g_app.hwnd) || IsIconic(g_app.hwnd)) return;
@@ -2197,19 +2205,19 @@ static void TrackNormRect() {
         g_app.normRect = r;
 }
 
-// 全屏切换动画·播放：把窗口矩形从 zoomFrom 过渡到 zoomTo 一口气跑完。
-// 每帧 = 改窗口矩形（→ WM_SIZE → 布局跟着变）→ 立刻重画 → DwmFlush() 等下一次
-// 合成（节奏 = 屏幕刷新率，120Hz 屏上 ~8.3ms/帧）。
-// 不用 WM_TIMER 驱动：最小间隔 ~10~15.6ms（≈64fps），120Hz 屏上正好砍掉一半帧；
-// 直接由 StartZoom 调用，点击后 ~1ms 就开跑（定时器会让首帧迟到 15~31ms）。
-// 进度用 QPC：见 qpcMs 的说明。
+// Animate the window rectangle from zoomFrom to zoomTo synchronously.
+// Each frame changes the rectangle (WM_SIZE updates layout), repaints immediately,
+// then waits for composition with DwmFlush (about 8.3 ms/frame at 120 Hz).
+// WM_TIMER's roughly 10-15.6 ms minimum would drop frames on fast displays.
+// Starting directly avoids the 15-31 ms first-frame delay of a timer.
+// Progress uses QPC; see qpcMs.
 static void RunZoomAnim() {
     AnimationTimerPrecision precision;
     precision.acquire();
     float dur = g_app.zoomMs > 40.0f ? g_app.zoomMs : 40.0f;
-    g_app.gfx.presentSync = 0;      // 节奏交给 DwmFlush，Present 自己不再等垂直同步
-    // 调试钩子：环境变量 TW_ANIMLOG=1 时把每帧耗时拆解（set/paint/flush）追加写
-    // %TEMP%\tw_anim.log。看两项：相邻 frame 的 t 步长（应 ≈ 刷新间隔）、flush 值。
+    g_app.gfx.presentSync = 0;      // Let DwmFlush pace frames; Present must not also wait for vertical sync.
+    // TW_ANIMLOG=1 appends per-frame set/paint/flush timings to %TEMP%\tw_anim.log.
+    // Check adjacent frame timestamps against the refresh interval, plus the flush duration.
     static FILE* alog = nullptr;
     static bool alogInit = false;
     if (!alogInit) {
@@ -2227,7 +2235,7 @@ static void RunZoomAnim() {
         float t = (float)((c0 - g_app.zoomStartMs) / dur);
         if (t > 1.0f) t = 1.0f;
         if (t < 0.0f) t = 0.0f;
-        float e = 1.0f - powf(1.0f - t, 3.0f);               // 三次缓出（先快后慢）
+        float e = 1.0f - powf(1.0f - t, 3.0f);               // Cubic ease-out: fast initially, slower near the end.
         RECT r;
         r.left   = g_app.zoomFrom.left   + (LONG)((g_app.zoomTo.left   - g_app.zoomFrom.left)   * e);
         r.top    = g_app.zoomFrom.top    + (LONG)((g_app.zoomTo.top    - g_app.zoomFrom.top)    * e);
@@ -2239,9 +2247,9 @@ static void RunZoomAnim() {
         SetWindowPos(g_app.hwnd, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         double c1 = qpcMs();
-        UpdateWindow(g_app.hwnd);       // 这一帧立刻画出来（Present 在 WM_PAINT 里）
+        UpdateWindow(g_app.hwnd);       // Paint this frame immediately; Present runs inside WM_PAINT.
         double c2 = qpcMs();
-        DwmFlush();                     // 等下一次合成：帧率跟着刷新走
+        DwmFlush();                     // Wait for the next composition cycle to match the display refresh rate.
         double c3 = qpcMs();
         if (alog)
             fwprintf(alog, L"frame %d t=%.4f rect=%ld,%ld,%ld,%ld set=%.2f paint=%.2f(repaint=%d) flush=%.2f total=%.2f gap_us=%.0f\n",
@@ -2265,21 +2273,21 @@ static void RunZoomAnim() {
     g_app.gfx.presentSync = 1;
 }
 
-// 全屏切换动画·入口：窗口矩形从"现在"平滑过渡到 工作区 / 还原矩形。
-// 时长 200ms、三次缓出，和 Win11 自带的最大化手感接近。每一帧都走
-// SetWindowPos -> WM_SIZE -> ComputeLayout，内容跟着窗口连续变化。
+// Start a smooth transition from the current rectangle to the work area or restore rectangle.
+// The 200 ms cubic ease-out approximates Windows 11 maximize motion. Each frame runs
+// SetWindowPos -> WM_SIZE -> ComputeLayout so content follows the changing window size.
 static void StartZoom(bool toMax) {
     HWND h = g_app.hwnd;
-    if (g_app.zooming) return;                       // 正在播就忽略新的请求
+    if (g_app.zooming) return;                       // Ignore new requests while a transition is running.
     RECT cur;
     GetWindowRect(h, &cur);
     RECT target;
     if (toMax) {
         MONITORINFO mi = {sizeof(mi)};
         if (!GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) return;
-        target = mi.rcWork;                          // 最大化目标 = 工作区（与 WM_GETMINMAXINFO 一致）
+        target = mi.rcWork;                          // Maximize to the work area, matching WM_GETMINMAXINFO.
     } else {
-        // 还原目标用我们自己记的矩形（系统那份可能已被"动画到工作区再收尾"弄脏）
+        // Use our saved restore rectangle; the system record may have changed during animation.
         if (g_app.normRect.right > g_app.normRect.left) {
             target = g_app.normRect;
         } else {
@@ -2291,16 +2299,16 @@ static void StartZoom(bool toMax) {
         }
     }
     if (EqualRect(&cur, &target)) { ApplyZoomState(toMax); return; }
-    if (toMax) g_app.normRect = cur;   // 关键：开始去全屏的这一刻，当前矩形就是还原落点
+    if (toMax) g_app.normRect = cur;   // At maximize start, the current rectangle is the future restore destination.
     g_app.zoomFrom = cur;
     g_app.zoomTo = target;
     g_app.zoomToMax = toMax;
     g_app.zooming = true;
     g_app.zoomStartMs = qpcMs();
-    RunZoomAnim();                     // 立即开跑：不等 WM_TIMER
+    RunZoomAnim();                     // Start immediately without waiting for WM_TIMER.
 }
 
-// 窗口动画：show=true 淡入（从下方轻推入），false 淡出后自动隐藏
+// show=true fades/slides in; false fades out then hides the window.
 static void StartWindowAnim(bool show) {
     g_app.winAnimTarget = show ? 1.0f : 0.0f;
     g_app.winAnimating = true;
@@ -2312,7 +2320,7 @@ static void StartWindowAnim(bool show) {
 static bool EnsureUiInitialized() {
     if (g_app.gfx.dc()) return true;
     if (!g_app.gfx.init(g_app.hwnd)) {
-        MessageBoxW(g_app.hwnd, L"图形初始化失败（需要 DirectX 11 / Windows 10 及以上）",
+        MessageBoxW(g_app.hwnd, L"Graphics initialization failed. DirectX 11 and Windows 10 or later are required.",
                     kAppDisplay, MB_OK | MB_ICONERROR);
         return false;
     }
@@ -2346,7 +2354,7 @@ static void ShowMainWindow() {
 }
 
 static void HideMainWindow() {
-    // 第一次"关闭到托盘"时气泡提示一下，否则用户会以为程序退出了
+    // On the first close-to-tray action, explain that the app is still running.
     static bool tipped = false;
     if (!tipped && g_app.trayAdded) {
         tipped = true;
@@ -2355,8 +2363,8 @@ static void HideMainWindow() {
         nid.hWnd = g_app.hwnd;
         nid.uID = 1;
         nid.uFlags = NIF_INFO;
-        wcscpy_s(nid.szInfoTitle, L"仍在后台运行");
-        wcscpy_s(nid.szInfo, L"窗口已收进托盘，自动切换壁纸不会停。单击托盘图标可重新打开，右键托盘图标可退出。");
+        wcscpy_s(nid.szInfoTitle, L"Still running in the background");
+        wcscpy_s(nid.szInfo, L"The app is in the system tray and will keep switching wallpapers. Click the tray icon to reopen it, or right-click to quit.");
         nid.dwInfoFlags = NIIF_INFO;
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -2365,7 +2373,7 @@ static void HideMainWindow() {
 
 static void StepAnim() {
     bool busy = false;
-    // 所有指数缓动的系数按实际经过的 dt 换算（帧率无关），时间用 QPC
+    // Scale exponential easing by actual elapsed QPC time so motion is frame-rate independent.
     static double lastMs = 0;
     double nowMs = qpcMs();
     float dt = lastMs > 0 ? (float)(nowMs - lastMs) : 15.6f;
@@ -2373,7 +2381,7 @@ static void StepAnim() {
     if (dt < 2.0f) dt = 2.0f;
     if (dt > 60.0f) dt = 60.0f;
     auto ease = [&](float k0) { return 1.0f - powf(1.0f - k0, dt / 15.6f); };
-    for (int i = 0; i < 2; ++i) {        // 开关滑块
+    for (int i = 0; i < 2; ++i) {        // Toggle knobs.
         float d = g_app.toggleTarget[i] - g_app.toggleAnim[i];
         if (d > 0.001f || d < -0.001f) {
             g_app.toggleAnim[i] += d * ease(0.35f);
@@ -2382,7 +2390,7 @@ static void StepAnim() {
             g_app.toggleAnim[i] = g_app.toggleTarget[i];
         }
     }
-    {   // 外观分段控件：指示条滑动（约 0.15~0.2 秒到位）+ 按下缩放
+    {   // Appearance indicator: slide in about 0.15-0.2 seconds and scale when pressed.
         float d = (float)g_app.segTarget - g_app.segAnim;
         if (d > 0.002f || d < -0.002f) {
             g_app.segAnim += d * ease(0.32f);
@@ -2399,7 +2407,7 @@ static void StepAnim() {
             g_app.segScale = s;
         }
     }
-    {   // 切换方式分段控件：与外观同款
+    {   // Switch-mode indicator uses the same animation as appearance.
         float d = (float)g_app.swTarget - g_app.swAnim;
         if (d > 0.002f || d < -0.002f) {
             g_app.swAnim += d * ease(0.32f);
@@ -2430,7 +2438,7 @@ static void StepAnim() {
             }
         }
     }
-    {   // 整页滚动：滚轮只改 scrollTarget，这里缓动追上去（指数缓出 = 网页手感）
+    {   // The wheel updates scrollTarget; exponential easing gives smooth page scrolling.
         float d = g_app.scrollTarget - g_app.scroll;
         if (d > 0.3f || d < -0.3f) {
             g_app.scroll += d * ease(0.28f);
@@ -2439,7 +2447,7 @@ static void StepAnim() {
             g_app.scroll = g_app.scrollTarget;
         }
     }
-    {   // 滚动条：滚动时淡入、停手约 0.9 秒后淡出；淡出期间定时器得继续跑
+    {   // Fade the scrollbar in while scrolling and out after about 0.9 seconds; keep the timer active.
         bool recent = (qpcMs() - g_app.lastScrollMs) < 900.0;
         float targetA = (g_app.L.maxScroll > 0.0f && (recent || g_app.sbDragging)) ? 1.0f : 0.0f;
         float da = targetA - g_app.sbAlpha;
@@ -2449,7 +2457,7 @@ static void StepAnim() {
         } else {
             g_app.sbAlpha = targetA;
         }
-        if (targetA > 0.5f && g_app.sbAlpha > 0.002f) busy = true;   // 等淡出走完再停
+        if (targetA > 0.5f && g_app.sbAlpha > 0.002f) busy = true;   // Wait for fade-out completion before stopping the timer.
     }
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
     if (!busy && !g_app.winAnimating) {
@@ -2459,7 +2467,7 @@ static void StepAnim() {
 }
 
 // ---------------------------------------------------------------------------
-//  选择主题 / 应用
+// Theme selection and application.
 // ---------------------------------------------------------------------------
 static void SelectTheme(int idx) {
     if (idx < 0 || idx >= (int)g_app.themes.size()) return;
@@ -2468,7 +2476,7 @@ static void SelectTheme(int idx) {
     g_app.cfg.noTheme = false;
     SaveConfig(g_app.cfg);
     ComputeLayout(g_app.L);
-    EnsureCardVisible(g_app.selIdx);     // 卡片在第二行以后就平滑滚过去
+    EnsureCardVisible(g_app.selIdx);     // Smoothly scroll lower-row cards into view.
     StartAnim();
     ApplyCurrent(true, true);
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -2481,9 +2489,9 @@ static void OpenThemesFolder() {
 }
 
 // ---------------------------------------------------------------------------
-//  卸载
+// Uninstall.
 // ---------------------------------------------------------------------------
-// 读安装程序写下的安装位置（卸载项的 InstallLocation）。必须在删除该键之前读。
+// Read InstallLocation from the uninstall entry before deleting that registry key.
 static std::wstring RegisteredInstallDir() {
     wchar_t buf[MAX_PATH * 2] = {0};
     DWORD sz = sizeof(buf);
@@ -2494,7 +2502,7 @@ static std::wstring RegisteredInstallDir() {
     return buf;
 }
 
-// 两个路径是否指向同一个目录（忽略大小写与末尾分隔符）
+// Compare directory paths ignoring case and trailing separators.
 static bool SameDir(const std::wstring& a, const std::wstring& b) {
     if (a.empty() || b.empty()) return false;
     auto trim = [](std::wstring s) {
@@ -2504,11 +2512,11 @@ static bool SameDir(const std::wstring& a, const std::wstring& b) {
     return _wcsicmp(trim(a).c_str(), trim(b).c_str()) == 0;
 }
 
-// 能不能把 exe 所在目录整个删掉。只有两种情况算数：
-//   ① 卸载项里的 InstallLocation 就是这里（安装程序装的，用户可能自选过目录）；
-//   ② 没写卸载项时，只认默认安装位置 %LOCALAPPDATA%\Programs\Dynamic Wallpapers。
-// 便携版常和别的文件放在同一个文件夹里（桌面、下载目录…），无条件删会把
-// 用户整个文件夹删掉——拿不准就只删 exe 本身。
+// Remove the executable's entire directory only in these cases:
+// 1. It matches the registered InstallLocation, including a user-selected install path.
+// 2. No uninstall entry exists, but it is the default %LOCALAPPDATA%\Programs\Dynamic Wallpapers.
+// Portable executables may share Desktop or Downloads with unrelated files.
+// If the directory is not a confirmed installation, remove only the executable.
 static bool ShouldRemoveInstallDir(const std::wstring& exeDir, const std::wstring& registeredDir) {
     if (exeDir.empty()) return false;
     if (SameDir(exeDir, registeredDir)) return true;
@@ -2518,19 +2526,19 @@ static bool ShouldRemoveInstallDir(const std::wstring& exeDir, const std::wstrin
 }
 
 static void DoUninstall() {
-    const std::wstring regDir = RegisteredInstallDir();     // 下面会删掉卸载项，先读出来
+    const std::wstring regDir = RegisteredInstallDir();     // Read the uninstall entry before it is removed below.
     const bool removeDir = ShouldRemoveInstallDir(ExeDir(), regDir);
 
-    // 卸载前先跟用户说清楚"到底会删什么"：便携版不会动程序所在的文件夹
-    std::wstring msg = L"确定要卸载“Dynamic Wallpapers”吗？\n\n将删除：";
-    msg += removeDir ? L"程序文件夹、" : L"程序文件（不删它所在的文件夹）、";
-    msg += L"桌面与开始菜单快捷方式、开机启动项，以及配置与用户主题目录"
-           L"（%APPDATA%\\Dynamic Wallpapers）。";
-    if (MessageBoxW(g_app.hwnd, msg.c_str(), L"卸载确认", MB_YESNO | MB_ICONQUESTION) != IDYES)
+    // Explain exactly what will be removed; portable installs retain their parent directory.
+    std::wstring msg = L"Uninstall Dynamic Wallpapers?\n\nThis will remove: ";
+    msg += removeDir ? L"the application folder, " : L"the application file (its parent folder will be kept), ";
+    msg += L"desktop and Start menu shortcuts, startup entries, settings, and user themes."
+           L" (%APPDATA%\\Dynamic Wallpapers).";
+    if (MessageBoxW(g_app.hwnd, msg.c_str(), L"Confirm uninstall", MB_YESNO | MB_ICONQUESTION) != IDYES)
         return;
 
-    // 请正在运行的实例退出（否则程序文件被占用无法删除）。
-    // 辅助窗口用了另一个类名，按主窗口类名查找不会误伤自己。
+    // Ask the running instance to quit so its executable can be removed.
+    // The helper uses a different window class to avoid matching itself.
     for (int round = 0; round < 3; ++round) {
         bool any = false;
         HWND h = nullptr;
@@ -2538,7 +2546,7 @@ static void DoUninstall() {
             PostMessageW(h, WM_APP + 3, 0, 0);
             any = true;
         }
-        // 更名前的老进程（过渡期）：一并请它退出
+        // Also ask any legacy process to exit during the migration period.
         while ((h = FindWindowExW(nullptr, h, L"TimeWallMainWindow", nullptr)) != nullptr) {
             PostMessageW(h, WM_APP + 3, 0, 0);
             any = true;
@@ -2547,24 +2555,24 @@ static void DoUninstall() {
         Sleep(700);
     }
     SetAutoStart(false);
-    // 快捷方式（新名字 + 更名前的老名字，一起清）
+    // Remove shortcuts under both current and legacy names.
     wchar_t appdata[MAX_PATH * 2] = {0};
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata);
     for (const wchar_t* nm : { kAppDisplay, kLegacyDisplay }) {
         std::wstring smDir = JoinPath(JoinPath(appdata,
             L"Microsoft\\Windows\\Start Menu\\Programs"), nm);
         DeleteFileW(JoinPath(smDir, std::wstring(nm) + L".lnk").c_str());
-        RemoveDirectoryW(smDir.c_str());          // 顺带删掉空的开始菜单文件夹
+        RemoveDirectoryW(smDir.c_str());          // Remove the Start menu folder if it is empty.
     }
     wchar_t desktop[MAX_PATH * 2] = {0};
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop))) {
         DeleteFileW(JoinPath(desktop, std::wstring(kAppDisplay) + L".lnk").c_str());
         DeleteFileW(JoinPath(desktop, std::wstring(kLegacyDisplay) + L".lnk").c_str());
     }
-    // 注册表卸载项（新键 + 更名前的旧键）
+    // Remove current and legacy uninstall registry entries.
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DynamicWallpapers");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\TimeWall");
-    // 配置与用户主题目录（新目录 + 更名前的旧目录）
+    // Remove current and legacy settings/user-theme directories.
     std::vector<std::wstring> dirs = { AppDataDir() };
     if (appdata[0]) dirs.push_back(JoinPath(appdata, L"TimeWall"));
     for (const std::wstring& ad : dirs) {
@@ -2580,14 +2588,14 @@ static void DoUninstall() {
             CloseHandle(pi.hThread);
         }
     }
-    // 顺序很关键：先让用户确认"卸载完成"，再安排自删——否则这个提示框会让
-    // 进程一直活着，exe 无法被删除
-    MessageBoxW(nullptr, L"卸载完成。程序文件将在几秒后自动删除。", kAppDisplay,
+    // Show completion before scheduling self-deletion; otherwise the message box keeps
+    // the process alive and locks the executable.
+    MessageBoxW(nullptr, L"Uninstall complete. The application files will be removed in a few seconds.", kAppDisplay,
                 MB_OK | MB_ICONINFORMATION);
 
     std::wstring exeDir = ExeDir();
     std::wstring self = ExePath();
-    // 只删 exe；只有"确认是安装目录"时才连目录一起删（见 ShouldRemoveInstallDir）
+    // Delete only the executable unless ShouldRemoveInstallDir confirms the installation directory.
     std::wstring bat = L"cmd.exe /c ping 127.0.0.1 -n 3 > nul & del /f /q \"" + self + L"\"";
     if (removeDir) bat += L" & rmdir /s /q \"" + exeDir + L"\"";
     STARTUPINFOW si2 = {sizeof(si2)};
@@ -2602,10 +2610,10 @@ static void DoUninstall() {
 }
 
 // ---------------------------------------------------------------------------
-//  窗口过程
+// Window procedure.
 // ---------------------------------------------------------------------------
 static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
-    // Explorer 重启后要重新加回托盘图标
+    // Re-add the tray icon after Explorer restarts.
     if (g_taskbarCreatedMsg && msg == g_taskbarCreatedMsg) {
         g_app.trayAdded = false;
         AddTrayIcon();
@@ -2613,15 +2621,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     }
     switch (msg) {
     case WM_NCCALCSIZE:
-        // 保留 WS_CAPTION 的系统行为，但在创建及后续调整时都让客户区铺满窗口，
-        // 不显示系统标题栏/边框；最大化外框 = 工作区（见 WM_GETMINMAXINFO）。
+        // Retain WS_CAPTION behavior but extend the client over the frame on creation and resize.
+        // No system caption/border is visible; maximized bounds match the work area.
         return 0;
 
     case WM_NCHITTEST: {
         POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
         RECT wr;
         GetWindowRect(h, &wr);
-        // 四边/四角 8 DIP 内是缩放区（Windows 分屏、Aero Snap 靠它）
+        // Use an 8 DIP resize region on edges/corners for native resizing and Aero Snap.
         int bw = (int)(8 * g_app.gfx.scale());
         bool onL = pt.x < wr.left + bw, onR = pt.x >= wr.right - bw;
         bool onT = pt.y < wr.top + bw,  onB = pt.y >= wr.bottom - bw;
@@ -2644,16 +2652,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
         };
         if (y < Ui::TitleBarH) {
-            // 最大化按钮返回 HTMAXBUTTON，系统才会显示 Win11 的"贴靠布局"浮出
+            // Return HTMAXBUTTON to enable the Windows 11 snap layout flyout.
             if (in(L.captionMax)) return HTMAXBUTTON;
-            // 最小化/关闭是自己画的，走客户区消息
+            // Custom minimize/close buttons use client messages.
             if (in(L.captionMin) || in(L.captionClose)) return HTCLIENT;
-            return HTCAPTION;        // 其余标题栏：拖动、双击最大化、拖到边缘分屏
+            return HTCAPTION;        // The remaining caption supports drag, double-click maximize, and edge snapping.
         }
         return HTCLIENT;
     }
 
-    // 最大化按钮的悬停/按下高亮（HTMAXBUTTON 区域的鼠标消息是 NC 消息）
+    // Maximize hover/press uses nonclient messages from the HTMAXBUTTON region.
     case WM_NCMOUSEMOVE: {
         int id = (w == HTMAXBUTTON) ? CID_MAX : CID_NONE;
         if (id != g_app.hot) {
@@ -2662,7 +2670,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             TrackMouseEvent(&tme);
             InvalidateRect(h, nullptr, FALSE);
         }
-        break;                       // 交给 DefWindowProc 处理默认行为
+        break;                       // Delegate native behavior to DefWindowProc.
     }
 
     case WM_NCMOUSELEAVE:
@@ -2674,8 +2682,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
 
     case WM_NCLBUTTONDOWN:
         if (w == HTMAXBUTTON) {
-            // 点击动画自己插值窗口矩形过渡到全屏/还原（见 StartZoom）；
-            // 返回 HTMAXBUTTON 只是为了拿到系统的"贴靠布局"浮出
+            // Use StartZoom for custom rectangle interpolation on maximize/restore clicks.
+            // HTMAXBUTTON is used to retain the native snap layout flyout.
             g_app.pressed = CID_MAX;
             InvalidateRect(h, nullptr, FALSE);
             StartZoom(!g_app.maximized);
@@ -2689,17 +2697,17 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         }
         break;
     case WM_NCLBUTTONDBLCLK:
-        if (w == HTCAPTION) {          // 双击标题栏 = 最大化/还原（同样带动画）
+        if (w == HTCAPTION) {          // Double-clicking the title bar toggles maximize/restore with animation.
             StartZoom(!g_app.maximized);
             return 0;
         }
         break;
 
     case WM_GETMINMAXINFO: {
-        // 必须先让系统把 ptMaxSize/ptMaxPosition 填好再改，否则最大化会忽略任务栏。
-        // 自绘窗口不使用系统边框余量，要显式给工作区尺寸；
-        // 不加边框余量（配合 WM_NCCALCSIZE 恒返回 0）：窗口外框 = 工作区，
-        // 不会在顶部/底部留下被材质刷亮的"灰边"。
+        // Let Windows initialize ptMaxSize/ptMaxPosition first so the taskbar is respected.
+        // This custom window needs explicit work-area bounds without extra frame margins.
+        // Together with WM_NCCALCSIZE returning zero, outer bounds match the work area,
+        // avoiding bright material strips along the top or bottom.
         LRESULT res = DefWindowProcW(h, msg, w, l);
         MINMAXINFO* mmi = (MINMAXINFO*)l;
         UINT dpi = GetDpiForWindow(h);
@@ -2711,7 +2719,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
             mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
         }
-        // 最小尺寸：宽至少放 3 张卡片，高至少放得下全部区块
+        // Minimum width fits three cards; minimum height accommodates all sections.
         int minW = (int)((kPadX * 2 + 3 * (kCardW + 12) + 12) * dpi / 96.0f);
         int minH = (int)((kWinH + 8) * dpi / 96.0f);
         if (mmi->ptMinTrackSize.x < minW) mmi->ptMinTrackSize.x = minW;
@@ -2723,7 +2731,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         return 1;
 
     case WM_PAINT: {
-        ++g_paintCount;                 // TW_ANIMLOG 调试钩子用
+        ++g_paintCount;                 // TW_ANIMLOG diagnostics.
         PAINTSTRUCT ps;
         BeginPaint(h, &ps);
         RenderFrame();
@@ -2748,41 +2756,41 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     }
 
     case WM_SIZE:
-        // 系统最小化时的图标占位尺寸不参与布局，也不用于调整图形缓冲。
+        // Do not use minimized icon-placeholder dimensions for layout or graphics buffers.
         if (w == SIZE_MINIMIZED || IsIconic(h)) return 0;
         if (g_app.gfx.dc()) {
             RECT rc;
             GetClientRect(h, &rc);
             UINT dpi = GetDpiForWindow(h);
             g_app.gfx.resize(rc.right - rc.left, rc.bottom - rc.top, dpi);
-            // 客户区尺寸（DIP）——布局/命中测试全部基于它
+            // Client size in DIPs, shared by layout and hit testing.
             float sc = dpi / 96.0f;
             g_app.winWDip = (rc.right - rc.left) / sc;
             g_app.winHDip = (rc.bottom - rc.top) / sc;
-            // 缩放动画进行中时以动画目标为准（否则还原过程中图标/圆角慢半拍）
+            // During zoom, use the target state to avoid lagging icons and corners.
             g_app.maximized = g_app.zooming ? g_app.zoomToMax : (IsZoomed(h) != 0);
-            // 最大化时窗口贴着屏幕，不需要圆角；动画过程中仍用圆角，收尾那一帧再变方
+            // Keep rounded corners during animation, then switch to square corners on maximized completion.
             bool square = g_app.maximized && !g_app.zooming;
             int corner = square ? 1 /*DONOTROUND*/ : 2 /*ROUND*/;
             DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-            if (g_app.bgBrush) {          // 渐变端点跟着高度走，重建
+            if (g_app.bgBrush) {          // Rebuild gradient endpoints for the new height.
                 g_app.bgBrush->Release();
                 g_app.bgBrush = nullptr;
             }
-            ComputeLayout(g_app.L);       // 窗口一变就重排
-            TrackNormRect();              // 非最大化状态下记住当前矩形，供还原动画使用
+            ComputeLayout(g_app.L);       // Reflow after every window size change.
+            TrackNormRect();              // Remember the normal rectangle for restore animation.
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
 
     case WM_MOVE:
-        TrackNormRect();                  // 只挪位置不改尺寸时也记一下
+        TrackNormRect();                  // Also track moves that do not change size.
         break;
 
     case WM_DPICHANGED: {
         RECT* r = (RECT*)l;
         UINT dpi = HIWORD(w);
-        // 保持同样的 DIP 尺寸（100% → 150% 时窗口物理尺寸跟着放大）
+        // Keep the same DIP size across DPI changes; physical dimensions scale accordingly.
         int nw = (int)(g_app.winWDip * dpi / 96.0f + 0.5f);
         int nh = (int)(g_app.winHDip * dpi / 96.0f + 0.5f);
         SetWindowPos(h, nullptr, r->left, r->top, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2794,7 +2802,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     case WM_SETTINGCHANGE: {
         RefreshPalette();
         CheckExternalWallpaper();
-        // 跟随系统：系统深浅色一改就立刻换壁纸（5 秒轮询只是兜底，这里更快）
+        // React to app-theme changes immediately; the five-second poll is only a fallback.
         if (g_app.cfg.switchMode == 1 && g_app.cfg.autoSwitch) {
             ApplyCurrent(false);
         }
@@ -2802,12 +2810,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         return 0;
     }
 
-    // 滚轮滚内容（交给 StepAnim 缓动）：一格 = 96 DIP；
-    // 触摸板/高精度滚轮给更小的增量，按比例换算是平滑的
+    // Wheel scrolling updates the animation target by 96 DIPs per notch.
+    // Scale smaller touchpad/high-resolution deltas proportionally.
     case WM_MOUSEWHEEL: {
-        if (AnyDialogOpen()) return 0;              // 弹层打开时内容不滚
+        if (AnyDialogOpen()) return 0;              // Do not scroll page content behind a modal dialog.
         const Layout& L = g_app.L;
-        if (L.maxScroll <= 0.0f) return 0;          // 内容放得下，没得滚
+        if (L.maxScroll <= 0.0f) return 0;          // All content fits; there is nothing to scroll.
         int delta = GET_WHEEL_DELTA_WPARAM(w);
         g_app.scrollTarget -= (float)delta / (float)WHEEL_DELTA * 96.0f;
         ClampScrollTarget();
@@ -2820,7 +2828,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     case WM_MOUSEMOVE: {
         float s = g_app.gfx.scale();
         float my = GET_Y_LPARAM(l) / s;
-        // 正在拖滚动条滑块：滑块跟着光标走（内容即时跟手，不做缓动）
+        // Dragging the scrollbar tracks the pointer immediately without easing.
         if (g_app.sbDragging) {
             const Layout& L = g_app.L;
             D2D1_RECT_F th = ScrollThumbRect();
@@ -2852,7 +2860,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN: {
         float s = g_app.gfx.scale();
         g_app.pressed = HitTest(GET_X_LPARAM(l) / s, GET_Y_LPARAM(l) / s);
-        // 滚动条：按住滑块 = 开始拖动；点轨道 = 翻一页（滚动半个视口多点）
+        // Drag the thumb or page by slightly more than half a viewport when clicking the track.
         if (g_app.pressed == CID_SCROLLBAR) {
             D2D1_RECT_F th = ScrollThumbRect();
             g_app.sbDragging = true;
@@ -2868,7 +2876,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             MarkScrolled();
             StartAnim();
         }
-        // 按在外观分段控件上：指示条先缩一下，松手弹回
+        // Shrink the appearance indicator on press and restore it on release.
         if (g_app.pressed >= CID_APPEARANCE0 && g_app.pressed <= CID_APPEARANCE2) {
             g_app.segPressed = true;
             StartAnim();
@@ -2888,11 +2896,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         ReleaseCapture();
         int pressed = g_app.pressed;
         g_app.pressed = CID_NONE;
-        if (g_app.sbDragging) {              // 拖动滚动条结束
+        if (g_app.sbDragging) {              // Finish dragging the scrollbar.
             g_app.sbDragging = false;
             MarkScrolled();
         }
-        if (g_app.segPressed) {              // 松手：按下缩放弹回
+        if (g_app.segPressed) {              // Restore pressed indicator scale on release.
             g_app.segPressed = false;
             StartAnim();
         }
@@ -2902,7 +2910,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         }
         if (id != pressed || id == CID_NONE) { InvalidateRect(h, nullptr, FALSE); return 0; }
 
-        // 主题卡片 ID = 基址 + 主题下标
+        // Theme control ID = base ID + theme index.
         if (id >= CID_THEME0 && id < CID_THEME0 + kThemeSlots) {
             SelectTheme(id - CID_THEME0);
         } else if (id == CID_DAY_MINUS || id == CID_DAY_PLUS) {
@@ -2942,7 +2950,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             RefreshPalette();
             StartAnim();
         } else if (id >= CID_SWITCH0 && id <= CID_SWITCH1) {
-            // 切换方式：立刻按新方式重算并应用壁纸
+            // Recompute and apply the wallpaper immediately after changing switch mode.
             g_app.cfg.switchMode = id - CID_SWITCH0;
             g_app.swTarget = g_app.cfg.switchMode;
             SaveConfig(g_app.cfg);
@@ -2957,7 +2965,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         } else if (id == CID_OV_DARK_SLOT) {
             PickAddThemeImage(false);
         } else if (id == CID_OV_NAME) {
-            // 点名称框：按点击位置摆光标（点击也取消选择）
+            // Clicking the name field sets the caret and clears selection.
             float px = GET_X_LPARAM(l) / g_app.gfx.scale() - (g_app.L.ovName.left + 10);
             EditSetCaretFromX(g_app.gfx, g_app.addUI.name, px);
         } else if (id == CID_REN_NAME) {
@@ -2981,7 +2989,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
 
     case WM_TIMER:
         if (w == TM_ANIM) { StepAnim(); return 0; }
-        if (w == TM_CARET) {                     // 输入框光标闪烁
+        if (w == TM_CARET) {                     // Blink the text editor caret.
             g_app.caretOn = !g_app.caretOn;
             if (!AnyDialogOpen()) KillTimer(h, TM_CARET);
             InvalidateRect(h, nullptr, FALSE);
@@ -2995,18 +3003,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         }
         break;
 
-    case WM_APP + 1:      // 来自第二个实例：显示自己
+    case WM_APP + 1:      // Another instance requests that this window become visible.
         ShowMainWindow();
         InvalidateRect(h, nullptr, FALSE);
         return 0;
 
-    case WM_APP + 4: {    // 来自第二个实例：--set-theme 接力——重读配置并立即切换
+    case WM_APP + 4: {    // Handle --set-theme from another instance: reload settings and apply immediately.
         g_app.cfg = LoadConfig();
         g_app.themes = ScanThemes();
         g_app.selIdx = g_app.cfg.noTheme ? -1 : 0;
         for (size_t i = 0; i < g_app.themes.size(); ++i)
             if (g_app.themes[i].name == g_app.cfg.theme) { g_app.selIdx = (int)i; break; }
-        ClearThumbs();                    // 主题列表重建了：缩略图缓存全套作废
+        ClearThumbs();                    // Invalidate all cached thumbnails after rebuilding the theme list.
         ApplyCurrent(true, true);
         if (g_app.glass) EnsureGlassBitmap(true);
         ShowMainWindow();
@@ -3024,7 +3032,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     case WM_SYSCOMMAND: {
         const UINT sc = w & 0xFFF0;
         if (sc == SC_MINIMIZE || (sc == SC_RESTORE && IsIconic(h))) {
-            // 中断尚未结束的显示/托盘淡出，避免系统动画叠加半透明内容，或还原后又被隐藏。
+            // Cancel incomplete fades so native animations do not overlap transparency or hide a restored window.
             const bool repaint = g_app.winAnim < 1.0f;
             g_app.winAnimating = false;
             g_app.hideAfterAnim = false;
@@ -3033,10 +3041,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
                 InvalidateRect(h, nullptr, FALSE);
                 UpdateWindow(h);
             }
-            // 不改窗口矩形或 WINDOWPLACEMENT，动画和还原状态都由 Windows 管理。
+            // Leave window rectangles and WINDOWPLACEMENT to Windows for native minimize/restore.
             return DefWindowProcW(h, msg, w, l);
         }
-        // 最大化 / 从最大化还原（任务栏右键菜单、系统菜单）走矩形过渡动画
+        // Maximize/restore from the system or taskbar menu uses the custom rectangle transition.
         if (sc == SC_MAXIMIZE && !g_app.zooming) {
             StartZoom(true);
             return 0;
@@ -3049,8 +3057,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     }
 
     case WM_KEYDOWN: {
-        // 弹层里有输入框时，编辑键自己处理（光标/退格/粘贴），其它按键也吃掉——
-        // 免得系统"叮"一声，或者把 Esc 之类交给默认处理
+        // Handle editor keys locally, consuming other keys while a text dialog is open
+        // to avoid system beeps or unintended default processing such as Escape.
         TextEdit* ed = ActiveEdit();
         if (ed) {
             if (w == VK_ESCAPE) {
@@ -3059,18 +3067,18 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
                 else if (g_app.delUI.active) CloseDelTheme();
                 return 0;
             }
-            if (w == VK_RETURN) {                 // 回车 = 直接确认
+            if (w == VK_RETURN) {                 // Enter confirms directly.
                 if (g_app.addUI.active) ConfirmAddTheme();
                 else if (g_app.renUI.active) ConfirmRenameTheme();
                 return 0;
             }
-            if ((GetKeyState(VK_CONTROL) & 0x8000) && (w == 'A')) {   // Ctrl+A 全选
+            if ((GetKeyState(VK_CONTROL) & 0x8000) && (w == 'A')) {   // Ctrl+A selects all.
                 EditSelectAll(*ed);
                 g_app.caretOn = true;
                 InvalidateRect(h, nullptr, FALSE);
                 return 0;
             }
-            if ((GetKeyState(VK_CONTROL) & 0x8000) && (w == 'V')) {   // Ctrl+V 粘贴
+            if ((GetKeyState(VK_CONTROL) & 0x8000) && (w == 'V')) {   // Ctrl+V pastes.
                 EditPaste(*ed);
                 g_app.caretOn = true;
                 InvalidateRect(h, nullptr, FALSE);
@@ -3085,7 +3093,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             }
             return 0;
         }
-        if (w == VK_ESCAPE && AnyDialogOpen()) {  // 没有输入框的弹层：Esc 关闭
+        if (w == VK_ESCAPE && AnyDialogOpen()) {  // Escape closes dialogs without a text editor.
             if (g_app.addUI.active) CloseAddTheme();
             if (g_app.delUI.active) CloseDelTheme();
             if (g_app.renUI.active) CloseRenameTheme();
@@ -3095,7 +3103,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     }
 
     case WM_CHAR: {
-        // 直接敲的字符（中文走 WM_IME_*，这里只管普通字符）
+        // Direct character input; IME composition uses WM_IME_* instead.
         TextEdit* ed = ActiveEdit();
         if (ed) {
             wchar_t c = (wchar_t)w;
@@ -3109,8 +3117,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         break;
     }
 
-    // 中文输入法：开始组合 / 组合变化 / 结束组合。
-    // 预编辑串自己画，确定后的结果串进输入框。
+    // IME composition start, update, and end.
+    // Draw preedit text separately and insert committed text into the editor.
     case WM_IME_STARTCOMPOSITION:
         if (ActiveEdit()) {
             ImeFollowEdit();
@@ -3131,8 +3139,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         }
         break;
 
-    case WM_APP + 2:      // 托盘图标消息
-        // 左键单击 = 显示/隐藏主界面（标准托盘习惯）；右键 = 菜单
+    case WM_APP + 2:      // Tray icon messages.
+        // Left-click toggles the window; right-click opens the tray menu.
         if (l == WM_LBUTTONUP) {
             if (IsWindowVisible(h) && !IsIconic(h)) HideMainWindow();
             else ShowMainWindow();
@@ -3141,7 +3149,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         }
         return 0;
 
-    case WM_APP + 3:      // 安装程序/卸载流程请求退出
+    case WM_APP + 3:      // Installer or uninstaller requests shutdown.
         DestroyWindow(h);
         return 0;
 
@@ -3163,7 +3171,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         return 0;
 
     case WM_DESTROY:
-        g_thumbLoader.stop();              // 等解码结束，再销毁窗口关联的图形资源
+        g_thumbLoader.stop();              // Wait for decoding before releasing graphics resources tied to the window.
         KillTimer(h, TM_ANIM);
         g_animTimerPrecision.release();
         RemoveTrayIcon();
@@ -3180,16 +3188,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
 }
 
 // ---------------------------------------------------------------------------
-//  入口
+// Entry point.
 // ---------------------------------------------------------------------------
 int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
-    // DPI 感知：Per-Monitor V2（保证 200% 缩放下的清晰度）
+    // Per-Monitor V2 DPI awareness for crisp rendering at high scaling factors.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY);
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    // ---- 命令行 ----
+    // Command-line arguments.
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool wantApplyOnly = false, wantShow = false, wantUninstall = false, opaque = false,
@@ -3200,7 +3208,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         std::wstring a = argv[i];
         if (a == L"--apply") wantApplyOnly = true;
         else if (a == L"--show") wantShow = true;
-        // 开机自启的注册表 Run 项里带 --autostart：开机只进托盘静默运行，不弹主界面
+        // The Run registry entry includes --autostart to launch silently in the tray.
         else if (a == L"--autostart" || a == L"--background" || a == L"--tray") wantHidden = true;
         else if (a == L"--uninstall") wantUninstall = true;
         else if (a.rfind(L"--simulate-hour=", 0) == 0)
@@ -3208,31 +3216,31 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         else if (a.rfind(L"--set-theme=", 0) == 0)
             setTheme = a.substr(12);
         else if (a.rfind(L"--add-theme-ui=", 0) == 0)
-            addThemeUiFolder = a.substr(15);      // 测试/演示：直接打开弹层并预填
+            addThemeUiFolder = a.substr(15);      // Test/demo hook: open and prefill the dialog.
         else if (a.rfind(L"--add-theme=", 0) == 0)
-            addThemeFolder = a.substr(12);        // 脚本用：直接导入主题
+            addThemeFolder = a.substr(12);        // Scripted direct theme import.
         else if (a.rfind(L"--delete-theme=", 0) == 0)
-            delThemeName = a.substr(15);          // 脚本用：直接删除主题（移到回收站）
+            delThemeName = a.substr(15);          // Scripted theme deletion to the Recycle Bin.
         else if (a.rfind(L"--hover-card=", 0) == 0)
-            hoverCard = _wtoi(a.substr(13).c_str());   // 测试：模拟鼠标停在第 N 张卡片上
+            hoverCard = _wtoi(a.substr(13).c_str());   // Test hook: simulate hovering over card N.
         else if (a.rfind(L"--zoom-ms=", 0) == 0)
-            g_app.zoomMs = (float)_wtoi(a.substr(10).c_str());  // 测试：全屏动画时长
-        else if (a == L"--opaque") opaque = true;    // 关毛玻璃，用不透明底（排错用）
+            g_app.zoomMs = (float)_wtoi(a.substr(10).c_str());  // Test hook: zoom duration.
+        else if (a == L"--opaque") opaque = true;    // Disable blur and use an opaque backdrop for diagnostics.
         else if (a == L"--self-glass" || a == L"--no-acrylic")
-            selfGlass = true;                          // 强制自绘磨砂（不用系统材质）
+            selfGlass = true;                          // Force the custom frosted backdrop instead of system material.
         else if (a == L"--acrylic")
-            selfGlass = false;                         // 显式指定系统亚克力（默认）
+            selfGlass = false;                         // Explicitly select system acrylic, the default where supported.
         else if (a == L"--solid")
-            forceSolid = true;                         // 强制纯色底，不模糊（排错/测试用）
+            forceSolid = true;                         // Force a solid background for diagnostics/testing.
     }
     if (argv) LocalFree(argv);
 
-    // ---- 单实例 ----
+    // Single instance.
     if (!SingleInstanceAcquire() && !wantApplyOnly && !wantUninstall) {
-        // 一次性的命令行动作（导入/删除主题）没法在旧实例里生效：
-        // 返回码 4 让脚本知道"需要先关掉正在运行的程序"
+        // One-shot import/delete actions cannot run through an already-running instance.
+        // Exit code 4 tells scripts to close that instance first.
         if (!addThemeFolder.empty() || !delThemeName.empty()) return 4;
-        // --set-theme=<名字>：写进配置，再让正在运行的实例重读配置并立即切换
+        // --set-theme writes settings and asks the running instance to reload and apply immediately.
         if (!setTheme.empty()) {
             Config c = LoadConfig();
             c.theme = setTheme;
@@ -3246,7 +3254,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     }
 
     if (wantUninstall) {
-        // 卸载流程用一个独立的辅助窗口类（避免与主窗口同名导致 FindWindow 混淆）
+        // Use a separate uninstall helper class to avoid confusing FindWindow with the main window.
         WNDCLASSEXW wc = {sizeof(wc)};
         wc.lpfnWndProc = DefWindowProcW;
         wc.hInstance = hInst;
@@ -3259,23 +3267,23 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         return 0;
     }
 
-    // ---- 配置与主题 ----
+    // Settings and themes.
     g_app.cfg = LoadConfig();
-    // 开机自启以注册表为准（安装程序可能已写入自启项，配置里还是旧值）
+    // The registry is authoritative for startup; an installer may have changed it since config was saved.
     {
         bool regAuto = AutoStartEnabled();
         if (regAuto != g_app.cfg.startOnBoot) {
             g_app.cfg.startOnBoot = regAuto;
             SaveConfig(g_app.cfg);
         }
-        // 顺手把自启命令行迁移成带 --autostart 的新格式（老版本写的是不带参数的）
+        // Migrate legacy startup commands to include --autostart.
         if (g_app.cfg.startOnBoot && !AutoStartHasBackgroundFlag()) SetAutoStart(true);
         g_app.toggleTarget[1] = g_app.toggleAnim[1] = regAuto ? 1.0f : 0.0f;
     }
     if (!setTheme.empty()) {
         g_app.cfg.theme = setTheme;
         g_app.cfg.noTheme = false;
-        SaveConfig(g_app.cfg);        // 命令行指定主题时立即落盘
+        SaveConfig(g_app.cfg);        // Persist a command-line theme selection immediately.
     }
     g_app.themes = ScanThemes();
     if (g_app.cfg.noTheme) g_app.selIdx = -1;
@@ -3284,7 +3292,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             if (g_app.themes[i].name == g_app.cfg.theme) { g_app.selIdx = (int)i; break; }
     }
     if (!g_app.cfg.noTheme && !g_app.themes.empty() && g_app.themes[g_app.selIdx].name != g_app.cfg.theme) {
-        // 配置里的主题已经不存在了（被删掉/改名）→ 落到第一个可用主题并写回配置
+        // If the saved theme disappeared, select the first available theme and save the new selection.
         g_app.cfg.theme = g_app.themes[g_app.selIdx].name;
         SaveConfig(g_app.cfg);
     }
@@ -3293,7 +3301,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         SaveConfig(g_app.cfg);
     }
 
-    // --add-theme=<文件夹>：把该文件夹里的图片直接导入为用户主题（脚本/测试用）
+    // --add-theme=<folder> imports images directly for scripts/tests.
     if (!addThemeFolder.empty()) {
         std::wstring name = addThemeFolder;
         size_t sl = name.find_last_of(L"\\/");
@@ -3306,9 +3314,9 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             if (dayImg.empty()) dayImg = imgs.front();
             if (nightImg.empty()) nightImg = imgs.size() > 1 ? imgs.back() : imgs.front();
             std::wstring outName, err;
-            // 只允许两张不同的图片（浅色、深色各一张）
+            // Require two distinct images, one light and one dark.
             if (dayImg == nightImg) {
-                g_app.statusMsg = L"未导入：需要至少两张不同的图片（浅色、深色各一张）";
+                g_app.statusMsg = L"Import failed: choose two different images, one light and one dark.";
                 g_app.statusMsgUntil = GetTickCount64() + 8000;
             } else if (ImportTheme(name, dayImg, nightImg, outName, &err)) {
                 g_app.cfg.theme = outName;
@@ -3317,24 +3325,24 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                 g_app.themes = ScanThemes();
                 for (size_t i = 0; i < g_app.themes.size(); ++i)
                     if (g_app.themes[i].name == outName) g_app.selIdx = (int)i;
-                g_app.statusMsg = L"已添加主题：" + outName;
+                g_app.statusMsg = L"Theme added: " + outName;
                 g_app.statusMsgUntil = GetTickCount64() + 8000;
             } else {
-                g_app.statusMsg = L"未导入" + (err.empty() ? std::wstring(L"") : (L"：" + err));
+                g_app.statusMsg = L"Import failed" + (err.empty() ? std::wstring(L"") : (L": " + err));
                 g_app.statusMsgUntil = GetTickCount64() + 8000;
             }
         }
     }
-    if (wantApplyOnly) {                       // 脚本模式：应用一次就退出
+    if (wantApplyOnly) {                       // Script mode: apply once and exit.
         ApplyCurrent(true);
         CoUninitialize();
         return 0;
     }
 
-    // --delete-theme=<名字>：脚本用，直接把主题移到回收站后退出
+    // --delete-theme=<name> moves the theme to the Recycle Bin and exits.
     if (!delThemeName.empty()) {
         const ThemeInfo* t = FindTheme(g_app.themes, delThemeName);
-        int rc = 2;                            // 2 = 没找到这个主题
+        int rc = 2;                            // 2 = theme not found.
         if (t) {
             std::wstring err;
             rc = DeleteThemeFolder(t->folder, err) ? 0 : 3;
@@ -3343,13 +3351,13 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         return rc;
     }
 
-    // ---- 窗口 ----
+    // Window creation.
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    // 图标按系统尺寸取（随 DPI），避免大图标被放大后发虚
+    // Use DPI-aware system icon dimensions to avoid blurry upscaling.
     int bigIcon = GetSystemMetrics(SM_CXICON), smallIcon = GetSystemMetrics(SM_CXSMICON);
     if (bigIcon <= 0) bigIcon = 32;
     if (smallIcon <= 0) smallIcon = 16;
@@ -3364,16 +3372,16 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
     g_app.hwnd = CreateWindowExW(WS_EX_APPWINDOW
-                                     | WS_EX_NOREDIRECTIONBITMAP,  // 毛玻璃的关键
+                                     | WS_EX_NOREDIRECTIONBITMAP,  // Required for a transparent acrylic backdrop.
                                  kWindowClass, kAppDisplay,
                                  kMainWindowStyle,
                                  sx, sy, w, h, nullptr, nullptr, hInst, nullptr);
     if (!g_app.hwnd) return 1;
 
-    // Win11 圆角 + 阴影；深色标题栏跟随系统
+    // Windows 11 rounded corners/shadows and a theme-aware dark title bar.
     int corner = 2;   // DWMWCP_ROUND
     DwmSetWindowAttribute(g_app.hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-    int backdrop = 2; // DWMSBT_MAINWINDOW（Mica；本程序自绘底色，此属性保证观感一致）
+    int backdrop = 2; // DWMSBT_MAINWINDOW (Mica); the app draws its own background for consistency.
     DwmSetWindowAttribute(g_app.hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
 
     RefreshPalette();
@@ -3382,71 +3390,71 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         g_app.winWDip = w / sc;
         g_app.winHDip = h / sc;
     }
-    // 窗口底色按系统能力选，前提都是窗口带 WS_EX_NOREDIRECTIONBITMAP（否则窗口
-    // 自带的重定向表面是一块不透明黑底，透不出系统材质）：
-    //   Win11 22H2+：DWMWA_SYSTEMBACKDROP_TYPE，DWM 实时模糊窗口背后的所有内容。
-    //   Win10：纯色底（跟随深浅色）。
-    //   --self-glass 强制自绘磨砂；--solid 强制纯色底（排错/测试用）；--opaque 不透明渐变。
+    // Choose the backdrop by OS support. All transparent modes require WS_EX_NOREDIRECTIONBITMAP;
+    // otherwise the redirection surface is opaque black and hides system materials.
+    // Windows 11 22H2+: use DWMWA_SYSTEMBACKDROP_TYPE for live blur behind the window.
+    // Windows 10: solid background following the app theme.
+    // --self-glass forces custom blur; --solid forces solid fill; --opaque uses an opaque gradient.
     if (!opaque) {
         bool backdrop = false;
         if (!selfGlass && !forceSolid && IsWin11_22H2OrLater()) {
-            int backdropAcrylic = 3;            // DWMSBT_TRANSIENTWINDOW（亚克力）
+            int backdropAcrylic = 3;            // DWMSBT_TRANSIENTWINDOW (acrylic).
             backdrop = SUCCEEDED(DwmSetWindowAttribute(g_app.hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
                                                        &backdropAcrylic, sizeof(backdropAcrylic)));
         }
         if (backdrop) {
             g_app.liveGlass = true;
             g_app.glass = false;
-            g_app.statusMsg = L"毛玻璃：系统亚克力（实时模糊）";
+            g_app.statusMsg = L"Background: system acrylic (live blur)";
         } else if (selfGlass && !forceSolid) {
             g_app.glass = true;
             g_app.liveGlass = false;
             EnsureGlassBitmap(true);
-            g_app.statusMsg = L"毛玻璃：自绘磨砂（跟随壁纸）";
+            g_app.statusMsg = L"Background: custom blur (from wallpaper)";
         } else {
             g_app.glass = false;
             g_app.liveGlass = false;
             g_app.solidBg = true;
-            g_app.statusMsg = L"窗口底色：纯色（跟随深浅色）";
+            g_app.statusMsg = L"Background: solid color (follows app theme)";
         }
         g_app.statusMsgUntil = GetTickCount64() + 5000;
     } else {
-        g_app.glass = false;                    // --opaque：明确的纯色底
+        g_app.glass = false;                    // --opaque explicitly requests an opaque backdrop.
         g_app.liveGlass = false;
     }
 
-    // 普通窗口不该常驻顶层：启动时清掉可能残留的置顶标志（外部工具会留下它）
+    // Clear any stale topmost flag left by external tools; normal windows should not stay on top.
     if (GetWindowLongW(g_app.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
         SetWindowPos(g_app.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    // 外观分段控件初始就停在配置选中的那段（不要开机时滑一下）
+    // Start the appearance indicator at the configured segment without animating at startup.
     g_app.segTarget = g_app.cfg.appearance;
     g_app.segAnim = (float)g_app.cfg.appearance;
     g_app.swTarget = g_app.cfg.switchMode;
     g_app.swAnim = (float)g_app.cfg.switchMode;
     ComputeLayout(g_app.L);
     EnsureCardVisible(g_app.selIdx, true);
-    // 输入法：启动时先摘下 IME 上下文（没有输入框时不挂，免得随手按键弹候选窗）；
-    // 打开带输入框的弹层时再挂上（PrepareTextInput），关掉时再摘（EndTextInput）
+    // Detach IME at startup to prevent candidate windows when no editor is active.
+    // PrepareTextInput attaches it when a dialog opens; EndTextInput detaches it on close.
     g_app.himc = ImmAssociateContext(g_app.hwnd, nullptr);
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
     AddTrayIcon();
 
-    // 开机自启（--autostart）时不弹主界面，只在托盘里静默跑：壁纸该切照切；
-    // 用户点托盘图标/开始菜单快捷方式（带 --show）时才出现。--show 显式压过它。
+    // --autostart keeps switching in the tray without showing a window.
+    // The tray icon or --show shortcut opens it; explicit --show overrides background startup.
     const bool showNow = !wantHidden || wantShow;
     if ((showNow || !addThemeUiFolder.empty()) && !EnsureUiInitialized()) return 2;
     g_app.winAnim = showNow ? 0.0f : 1.0f;
     ShowWindow(g_app.hwnd, showNow ? SW_SHOWNORMAL : SW_HIDE);
     UpdateWindow(g_app.hwnd);
-    TrackNormRect();                                  // 记下初始矩形（还原动画的落点）
-    SetTimer(g_app.hwnd, TM_TICK, 5000, nullptr);     // 5 秒一次：到点切壁纸 + 重采磨砂底
+    TrackNormRect();                                  // Save the initial restore rectangle.
+    SetTimer(g_app.hwnd, TM_TICK, 5000, nullptr);     // Every five seconds: update scheduled wallpaper and resample the frosted backdrop.
 
-    // 首次出现也走一遍淡入动画（后台启动就不播了）
+    // Fade in on the first visible launch; skip for background startup.
     if (showNow) StartWindowAnim(true);
 
-    // --add-theme-ui=<文件夹>：测试/演示钩子——打开"添加主题"弹层，
-    // 并把这个文件夹里的前两张图预填进浅色/深色方框（省去手动点文件对话框）
+    // --add-theme-ui=<folder> opens the Add theme dialog for tests/demos,
+    // prefilling the first two images to avoid manual file picking.
     if (!addThemeUiFolder.empty()) {
         std::vector<std::wstring> imgs = ListImagesIn(addThemeUiFolder);
         OpenAddTheme();
@@ -3473,15 +3481,15 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         g_app.addUI.name.clearSel();
     }
 
-    // --hover-card=N：第 N 张卡片置为悬停（可看到右上角的"×/✎"）；
-    // 卡片在第二行以后时先滚到它那里（截图/验证第二三行卡片用）
+    // --hover-card=N shows card N's action buttons for screenshots/tests.
+    // Scroll lower rows into view first.
     if (hoverCard >= 0 && hoverCard < (int)g_app.themes.size()) {
         g_app.hot = CID_THEME0 + hoverCard;
         EnsureCardVisible(hoverCard, true);
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
     }
 
-    // 启动时对齐一次壁纸
+    // Apply the appropriate wallpaper once at startup.
     ApplyCurrent(true);
 
     MSG msg;

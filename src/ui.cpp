@@ -1,5 +1,5 @@
 // ============================================================================
-//  ui.cpp — WinUI3 风格视觉令牌与控件绘制实现
+// ui.cpp - WinUI 3 style tokens and control rendering.
 // ============================================================================
 #include "ui.h"
 #include <d2d1_1.h>
@@ -26,13 +26,13 @@ D2D1_COLOR_F ColLighten(const D2D1_COLOR_F& c, float t) {
 }
 
 // ---------------------------------------------------------------------------
-//  系统深浅色 / 强调色
+// System theme and accent color.
 //
-//  Windows 11 把强调色连同完整色阶放在
-//  HKCU\...\Explorer\Accent\AccentPalette（32 字节 = 8 组 RGBA：浅3/浅2/浅1/
-//  基准/深1/深2/深3/其它）。不要用 DWM\AccentColor：那是"上色(colorization)"
-//  值，比强调色暗一大截（实测强调色 #5A75A7，DWM 值 #113864），拿它当按钮
-//  强调色会和系统 UI 明显不一致。拿不到 AccentPalette 时退回兜底色。
+// Windows 11 stores the accent color and its shades in
+// HKCU\...\Explorer\Accent\AccentPalette: 32 bytes, 8 RGBA entries for light3/light2/light1/
+// base/dark1/dark2/dark3/other. DWM\AccentColor is a colorization value,
+// often much darker (observed: accent #5A75A7, DWM #113864), so it does not match system buttons.
+// Use a fallback color when AccentPalette is unavailable.
 // ---------------------------------------------------------------------------
 struct AccentRamp {
     D2D1_COLOR_F l3, l2, l1, base, d1, d2, d3;
@@ -57,7 +57,7 @@ static AccentRamp SystemAccentRamp() {
 }
 
 bool SystemUsesDarkMode() {
-    // Windows 的“自定义”可为系统和应用分别设置颜色；应用界面和壁纸均跟随应用模式。
+    // Windows Custom mode separates system and app colors; both UI and wallpaper follow app mode.
     DWORD v = 1, sz = sizeof(v);
     if (RegGetValueW(HKEY_CURRENT_USER,
                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
@@ -67,7 +67,7 @@ bool SystemUsesDarkMode() {
 }
 
 D2D1_COLOR_F SystemAccentColor() {
-    // DWM\AccentColor 格式 0xAABBGGRR
+    // DWM\AccentColor uses 0xAABBGGRR.
     DWORD v = 0, sz = sizeof(v);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", L"AccentColor",
                      RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS && (v & 0x00FFFFFF)) {
@@ -83,14 +83,14 @@ D2D1_COLOR_F SystemAccentColor() {
         float r = (float)((color >> 16) & 0xFF) / 255.0f;
         return Col(r, g, b, 1.0f);
     }
-    return ColHex(0x0067C0);   // Windows 默认蓝
+    return ColHex(0x0067C0);   // Default Windows blue.
 }
 
 Palette MakePalette(bool dark, const D2D1_COLOR_F& accent) {
     Palette p;
     p.dark = dark;
     if (!dark) {
-        p.windowBgTop    = ColHex(0xF3F3F3);   // Mica 浅色底
+        p.windowBgTop    = ColHex(0xF3F3F3);   // Light Mica background.
         p.windowBgBottom = ColHex(0xEDEDED);
         p.textPrimary    = Col(0, 0, 0, 0.89f);
         p.textSecondary  = Col(0, 0, 0, 0.61f);
@@ -100,7 +100,7 @@ Palette MakePalette(bool dark, const D2D1_COLOR_F& accent) {
         p.cardFill       = Col(1, 1, 1, 0.70f);
         p.cardFillHover  = Col(1, 1, 1, 0.85f);
         p.cardStroke     = Col(0, 0, 0, 0.06f);
-        // 按钮令牌跟随 Win11 的 ControlFill/ControlStroke，观感与系统一致
+        // Match Windows 11 ControlFill/ControlStroke tokens.
         p.ctrlFill       = Col(1, 1, 1, 0.70f);            // ControlFillColorDefault #B3FFFFFF
         p.ctrlFillHover  = Col(0.976f, 0.976f, 0.976f, 0.50f);  // ControlFillColorSecondary
         p.ctrlFillPressed= Col(0, 0, 0, 0.30f);            // ControlFillColorTertiary
@@ -141,7 +141,7 @@ Palette MakePalette(bool dark, const D2D1_COLOR_F& accent) {
         p.nightDot       = ColHex(0x9C9CF5);
         p.closeHover     = ColHex(0xC42B1C);
     }
-    // 强调色：浅色主题用 基准/深1/深2；深色主题基准色在暗底上发暗，改用浅色档
+    // Use base/dark1/dark2 accents in light mode and lighter shades for contrast in dark mode.
     AccentRamp ar = SystemAccentRamp();
     D2D1_COLOR_F acc = ar.ok ? ar.base : accent;
     if (!dark) {
@@ -157,7 +157,7 @@ Palette MakePalette(bool dark, const D2D1_COLOR_F& accent) {
     }
     p.accentDisabled = ColAlpha(p.accent, 0.40f);
     p.cardStrokeSelected = p.accent;
-    // 强调色上的文字按亮度取黑或白（系统也是按对比度选的）
+    // Choose black or white accent text based on luminance for contrast.
     {
         float lum = 0.299f * p.accent.r + 0.587f * p.accent.g + 0.114f * p.accent.b;
         p.textOnAccent = lum > 0.62f ? Col(0, 0, 0, 0.89f) : Col(1, 1, 1, 1.0f);
@@ -166,7 +166,7 @@ Palette MakePalette(bool dark, const D2D1_COLOR_F& accent) {
 }
 
 // ---------------------------------------------------------------------------
-//  基础控件
+// Basic controls.
 // ---------------------------------------------------------------------------
 void UiSectionTitle(Gfx& g, float x, float y, float w, const std::wstring& title,
                     const Palette& p, bool divider) {
@@ -193,13 +193,13 @@ void UiButton(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const Pal
         stroke = Col(0, 0, 0, 0);
         txt = enabled ? p.textOnAccent : ColAlpha(p.textOnAccent, 0.5f);
     } else {
-        // 禁用态不跟 hover/press 变色
+        // Disabled controls do not respond to hover or press colors.
         fill = !enabled ? p.ctrlFill
                         : (pressed ? p.ctrlFillPressed : (hovered ? p.ctrlFillHover : p.ctrlFill));
         stroke = (!enabled || !hovered) ? p.ctrlStroke : p.ctrlStrokeHover;
         txt = enabled ? p.textPrimary : p.textDisabled;
     }
-    // 禁用态也要画：主按钮描边全透明，不画就只剩半透明的字
+    // Draw the disabled fill too; a transparent primary border would otherwise leave only faded text.
     g.fillRound(rr, fill);
     if (stroke.a > 0.001f) g.strokeRound(rr, stroke, 1.0f);
     else if (pressed) g.strokeRound(rr, p.divider, 1.0f);
@@ -228,7 +228,7 @@ void UiCaptionButton(Gfx& g, const D2D1_RECT_F& r, int mode, bool hovered, bool 
         g.dc()->FillRectangle(r, g.brush(c));
     }
     float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-    float s = 5.0f;                              // 图标半径（10px 字形）
+    float s = 5.0f;                              // Icon radius for a 10px glyph.
     ID2D1SolidColorBrush* b = g.brush(isClose && hovered ? Col(1, 1, 1) : p.textPrimary);
     if (!b) return;
     switch (mode) {
@@ -239,12 +239,12 @@ void UiCaptionButton(Gfx& g, const D2D1_RECT_F& r, int mode, bool hovered, bool 
     case Ui::CAP_MIN:
         g.dc()->DrawLine(D2D1::Point2F(cx - s, cy), D2D1::Point2F(cx + s, cy), b, 1.0f);
         break;
-    case Ui::CAP_MAX:                            // 圆角方框（Win11 最大化图标形状）
+    case Ui::CAP_MAX:                            // Rounded square matching the Windows 11 maximize icon.
         g.dc()->DrawRoundedRectangle(
             D2D1::RoundedRect(D2D1::RectF(cx - s, cy - s + 0.5f, cx + s, cy + s - 0.5f), 1.5f, 1.5f),
             b, 1.1f);
         break;
-    case Ui::CAP_RESTORE:                        // 两个错开的方框
+    case Ui::CAP_RESTORE:                        // Two offset squares.
         g.dc()->DrawRectangle(D2D1::RectF(cx - s, cy - s + 2, cx + s - 2, cy + s), b, 1.0f);
         g.dc()->DrawLine(D2D1::Point2F(cx - s + 2, cy - s), D2D1::Point2F(cx + s, cy - s), b, 1.0f);
         g.dc()->DrawLine(D2D1::Point2F(cx + s, cy - s), D2D1::Point2F(cx + s, cy + s - 2), b, 1.0f);
@@ -255,7 +255,7 @@ void UiCaptionButton(Gfx& g, const D2D1_RECT_F& r, int mode, bool hovered, bool 
 }
 
 void UiToggle(Gfx& g, float x, float y, bool on, float animT, bool hovered, const Palette& p) {
-    (void)on;                                    // 画面上一切看 animT，on 只用于配置判断
+    (void)on;                                    // Rendering follows animT; on is only the logical configuration value.
     float w = Ui::ToggleW, h = Ui::ToggleH;
     float t = animT;
     if (t < 0.0f) t = 0.0f;
@@ -264,16 +264,16 @@ void UiToggle(Gfx& g, float x, float y, bool on, float animT, bool hovered, cons
     D2D1_ROUNDED_RECT track = D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), h / 2, h / 2);
     D2D1_COLOR_F onFill  = hovered ? p.accentHover : p.accent;
     D2D1_COLOR_F offFill = hovered ? p.toggleOffFillHover : p.toggleOffFill;
-    g.fillRound(track, ColBlend(offFill, onFill, t));    // 轨道：关→开 颜色渐变
+    g.fillRound(track, ColBlend(offFill, onFill, t));    // Interpolate the track color from off to on.
 
-    // 滑块：位置与颜色同步插值（关=深/浅色，开=反色白）
+    // Interpolate knob position and color together; the on state uses contrasting white.
     float knobR = Ui::ToggleKnob / 2;
     float inset = (h - Ui::ToggleKnob) / 2 + 1.0f;
     float left = x + inset + knobR, right = x + w - inset - knobR;
     float cx = left + (right - left) * t;
     g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, y + h / 2), knobR, knobR),
                         g.brush(ColBlend(p.toggleOffKnob, p.textOnAccent, t)));
-    // 关闭态滑块的一圈描边：随 t 淡出（浅色模式下才明显）
+    // Fade out the off-state knob outline; most visible in light mode.
     float ringA = (1.0f - t) * (p.dark ? 0.22f : 0.10f);
     if (ringA > 0.004f) {
         D2D1_COLOR_F ring = Col(0, 0, 0, ringA);
@@ -309,14 +309,14 @@ void UiStepper(Gfx& g, const D2D1_RECT_F& r, const std::wstring& value, const Pa
     g.fillRound(rr, p.ctrlFill);
     g.strokeRound(rr, p.ctrlStroke, 1.0f);
     float h = r.bottom - r.top;
-    float btnW = h;   // 左右各一个正方形按钮
-    // 分隔线
+    float btnW = h;   // Square buttons on each side.
+    // Dividers.
     ID2D1SolidColorBrush* line = g.brush(p.divider);
     if (line) {
         g.dc()->FillRectangle(D2D1::RectF(r.left + btnW, r.top + 6, r.left + btnW + 1, r.bottom - 6), line);
         g.dc()->FillRectangle(D2D1::RectF(r.right - btnW - 1, r.top + 6, r.right - btnW, r.bottom - 6), line);
     }
-    auto seg = [&](int part) {                 // part: 0=减 1=加
+    auto seg = [&](int part) {                 // part: 0=decrease, 1=increase.
         float x0 = part == 0 ? r.left : r.right - btnW;
         if (hoverPart != part && pressPart != part) return;
         D2D1_ROUNDED_RECT s = D2D1::RoundedRect(
@@ -327,9 +327,9 @@ void UiStepper(Gfx& g, const D2D1_RECT_F& r, const std::wstring& value, const Pa
     ID2D1SolidColorBrush* b = g.brush(p.textPrimary);
     if (b) {
         float cy = (r.top + r.bottom) / 2, s = 5.0f;
-        float mx = r.left + btnW / 2;          // 减号
+        float mx = r.left + btnW / 2;          // Minus sign.
         g.dc()->DrawLine(D2D1::Point2F(mx - s, cy), D2D1::Point2F(mx + s, cy), b, 1.2f);
-        float px = r.right - btnW / 2;         // 加号
+        float px = r.right - btnW / 2;         // Plus sign.
         g.dc()->DrawLine(D2D1::Point2F(px - s, cy), D2D1::Point2F(px + s, cy), b, 1.2f);
         g.dc()->DrawLine(D2D1::Point2F(px, cy - s), D2D1::Point2F(px, cy + s), b, 1.2f);
     }
@@ -340,11 +340,11 @@ void UiStepper(Gfx& g, const D2D1_RECT_F& r, const std::wstring& value, const Pa
 }
 
 // ---------------------------------------------------------------------------
-//  主题卡片（删/改按钮的命中矩形与绘制位置同源，尺寸集中在这里）
+// Theme cards share delete/rename geometry between hit testing and drawing.
 // ---------------------------------------------------------------------------
 static const float kCardPad = 6.0f;
 static const float kCardThumbH = 96.0f;
-static const float kDelRad = 10.0f;      // 右上角圆形按钮的半径
+static const float kDelRad = 10.0f;      // Radius of circular buttons in the top-right corner.
 
 static D2D1_RECT_F CardThumbRect(const D2D1_RECT_F& r) {
     return D2D1::RectF(r.left + kCardPad, r.top + kCardPad, r.right - kCardPad,
@@ -359,7 +359,7 @@ D2D1_RECT_F UiThemeCardDeleteRect(const D2D1_RECT_F& card) {
 
 D2D1_RECT_F UiThemeCardRenameRect(const D2D1_RECT_F& card) {
     D2D1_RECT_F dr = UiThemeCardDeleteRect(card);
-    float shift = kDelRad * 2 + 6;                 // 与"×"留 6 DIP 间隔
+    float shift = kDelRad * 2 + 6;                 // Leave a 6 DIP gap from the delete button.
     return D2D1::RectF(dr.left - shift, dr.top, dr.right - shift, dr.bottom);
 }
 
@@ -371,7 +371,7 @@ void UiThemeCard(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* thumb, const std::ws
     D2D1_ROUNDED_RECT trr = D2D1::RoundedRect(tr, 5, 5);
     if (thumb) {
         g.pushClip(trr);
-        // 等比铺满（cover）：按位图宽高比裁剪
+        // Cover the area while preserving aspect ratio and cropping excess pixels.
         D2D1_SIZE_F sz = thumb->GetSize();
         float tw = tr.right - tr.left, th = tr.bottom - tr.top;
         float scale = (sz.width / sz.height > tw / th) ? (th / sz.height) : (tw / sz.width);
@@ -384,7 +384,7 @@ void UiThemeCard(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* thumb, const std::ws
     } else {
         g.fillRound(trr, ColAlpha(p.textPrimary, 0.05f));
     }
-    // 选中徽标：左上角圆形 + 对勾（右上角留给删除/重命名按钮）
+    // Selection badge at top left; reserve top right for delete and rename.
     if (selected) {
         float cxc = tr.left + 13, cyc = tr.top + 13, rad = 10.0f;
         g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cxc, cyc), rad, rad), g.brush(p.accent));
@@ -394,7 +394,7 @@ void UiThemeCard(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* thumb, const std::ws
                       p.textOnAccent, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
     if (showDelete) {
-        // "✎"（在"×"左边）：平时的底是半透明黑，悬停时用强调色
+        // Rename button: translucent black normally, accent fill on hover.
         D2D1_RECT_F nr = UiThemeCardRenameRect(r);
         float nxc = (nr.left + nr.right) / 2, nyc = (nr.top + nr.bottom) / 2;
         g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(nxc, nyc), kDelRad, kDelRad),
@@ -404,7 +404,7 @@ void UiThemeCard(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* thumb, const std::ws
         g.textOptical(L"\uE70F", gf, D2D1::RectF(nr.left, nr.top, nr.right, nr.bottom),
                       Col(1, 1, 1, 1), DWRITE_TEXT_ALIGNMENT_CENTER);
 
-        // "×"：平时半透明黑（压住缩略图），悬停时用危险色；两条线画，比字形锐利
+        // Delete button: translucent black normally, danger fill on hover; lines are sharper than a glyph.
         D2D1_RECT_F dr = UiThemeCardDeleteRect(r);
         float cxc = (dr.left + dr.right) / 2, cyc = (dr.top + dr.bottom) / 2;
         g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cxc, cyc), kDelRad, kDelRad),
@@ -445,7 +445,7 @@ void UiStatusDot(Gfx& g, float cx, float cy, bool night, const Palette& p) {
 }
 
 // ---------------------------------------------------------------------------
-//  文字按钮 / 分段控件 / 遮罩
+// Text buttons, segmented controls, and overlays.
 // ---------------------------------------------------------------------------
 void UiTextButton(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const Palette& p,
                   bool hovered, bool pressed, const wchar_t* glyph, DWRITE_TEXT_ALIGNMENT align) {
@@ -468,7 +468,7 @@ void UiTextButton(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const
                                         r.bottom), c);
 }
 
-// 两个矩形在水平方向上的重叠宽度（算"指示条盖住某段多少"用）
+// Horizontal overlap used to measure how much of a segment the indicator covers.
 static float OverlapX(const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
     float l = a.left > b.left ? a.left : b.left;
     float r = a.right < b.right ? a.right : b.right;
@@ -479,7 +479,7 @@ void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& 
                  int selected, int hotSeg, const Palette& p, float anim, float pressScale) {
     if (items.empty()) return;
     const int n = (int)items.size();
-    if (anim < 0.0f) anim = (float)selected;              // 不传 anim = 静止在 selected
+    if (anim < 0.0f) anim = (float)selected;              // Without anim, keep the indicator at the selected segment.
     if (anim > (float)(n - 1)) anim = (float)(n - 1);
     if (anim < 0.0f) anim = 0.0f;
     if (pressScale <= 0.0f) pressScale = 1.0f;
@@ -489,19 +489,19 @@ void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& 
     g.strokeRound(rr, p.ctrlStroke, 1.0f);
 
     const float segW = (r.right - r.left) / (float)n;
-    // 任意浮点位置的段矩形（与整数段同一套内缩，指示条滑动时不跳变）
+    // Use the same inset at fractional and integer positions to prevent jumps during motion.
     auto segRect = [&](float idx) {
         return D2D1::RectF(r.left + idx * segW + 2, r.top + 2,
                            r.left + (idx + 1) * segW - 2, r.bottom - 2);
     };
 
-    // 悬停底色：只画在"没被指示条占据"的段上
+    // Draw hover fill only where the indicator does not cover the segment.
     for (int i = 0; i < n; ++i) {
         if (i == hotSeg && fabsf(anim - (float)i) > 0.02f)
             g.fillRound(D2D1::RoundedRect(segRect((float)i), 3, 3), ColAlpha(p.textPrimary, 0.06f));
     }
 
-    // 指示条：移动中按剩余距离左右各鼓一点，形成"拉伸"手感；按下围绕中心缩小
+    // Stretch the indicator toward its destination; shrink around its center when pressed.
     D2D1_RECT_F pk = segRect(anim);
     float travel = fabsf((float)selected - anim);
     float stretch = 6.0f * (travel > 1.0f ? 1.0f : travel);
@@ -514,7 +514,7 @@ void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& 
     }
     g.fillRound(D2D1::RoundedRect(pill, 3, 3), p.accent);
 
-    // 文字颜色按"指示条覆盖该段的程度"在 主文字色 ↔ 反色 之间渐变
+    // Blend primary and contrasting text colors according to indicator coverage.
     for (int i = 0; i < n; ++i) {
         D2D1_RECT_F seg = segRect((float)i);
         float cov = OverlapX(pill, seg) / (seg.right - seg.left);

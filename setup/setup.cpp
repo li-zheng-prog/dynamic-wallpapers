@@ -1,13 +1,13 @@
 // ============================================================================
-//  setup.cpp — 安装程序（单窗口向导，WinUI3 风格，复用 gfx/ui 渲染层）
+// setup.cpp - Single-window installer with WinUI 3 styling, sharing the gfx/ui layers.
 //
-//  所有安装文件作为 RCDATA 资源嵌在本 exe 里，运行时不依赖外部文件：
-//    · 每个待安装文件一个资源 ID（build/pack_setup.py 生成 payload.rc）
-//    · 资源 2000 = 清单文本，格式: id|kind|相对路径|主题名|文件大小
-//  安装位置：%LOCALAPPDATA%\Programs\Dynamic Wallpapers（无需管理员权限）
-//  卸载：写入"应用和功能"条目，卸载命令调用 DynamicWallpapers.exe --uninstall
-//  更名清理：旧版本（TimeWall / 壁纸随时间变化）的安装目录、快捷方式、卸载项、
-//  自启项在安装时顺手清掉（旧目录里的主题先并入新目录，用户自加的不丢）
+// All installation files are embedded as RCDATA; no external files are needed at runtime.
+// Each file has a resource ID assigned by build/pack_setup.py in payload.rc.
+// Resource 2000 is the manifest: id|kind|relative path|theme name|file size.
+// Install to %LOCALAPPDATA%\Programs\Dynamic Wallpapers without administrator rights.
+// Register an Apps & features entry that runs DynamicWallpapers.exe --uninstall.
+// Remove legacy installation folders, shortcuts, uninstall entries, and startup entries.
+// First merge legacy user themes into the new directory to preserve user data.
 // ============================================================================
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -28,7 +28,7 @@
 #include "ui.h"
 #include "resource.h"
 
-void RenderFrame();   // 前向声明（安装过程中直接调用重绘）
+void RenderFrame();   // Forward declaration for repainting during installation.
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
@@ -38,11 +38,11 @@ static const wchar_t* kWindowClass = L"DynamicWallpapersSetupWindow";
 static const float kWinW = 700.0f;
 static const float kWinH = 560.0f;
 static const float kPadX = 28.0f;
-static const wchar_t* kAppDisplay = L"Dynamic Wallpapers";      // 显示名（标题/快捷方式/卸载项）
-static const wchar_t* kAppExe     = L"DynamicWallpapers.exe";   // 主程序文件名
-static const wchar_t* kLegacyDisplay = L"壁纸随时间变化";        // 更名前：显示名/快捷方式名
-static const wchar_t* kLegacyAppName  = L"TimeWall";            // 更名前：安装目录/卸载项/自启项名
-static const wchar_t* kVersion = L"2.0.0";
+static const wchar_t* kAppDisplay = L"Dynamic Wallpapers";      // Display name for titles, shortcuts, and the uninstall entry.
+static const wchar_t* kAppExe     = L"DynamicWallpapers.exe";   // Installed executable filename.
+static const wchar_t* kLegacyDisplay = L"\u58c1\u7eb8\u968f\u65f6\u95f4\u53d8\u5316";        // Exact legacy display/shortcut name, retained only for migration.
+static const wchar_t* kLegacyAppName  = L"TimeWall";            // Legacy installation directory, uninstall entry, and startup entry name.
+static const wchar_t* kVersion = L"1.0.0";
 
 #define RES_MANIFEST 2000
 #define WM_APP_QUIT   (WM_APP + 3)
@@ -61,8 +61,8 @@ enum Page { PAGE_OPTIONS, PAGE_INSTALLING, PAGE_DONE };
 struct PayloadItem {
     int id = 0;
     std::wstring kind;    // app / theme
-    std::wstring rel;     // 相对安装目录的路径
-    std::wstring theme;   // 所属主题名（kind=theme 时）
+    std::wstring rel;     // Path relative to the installation directory.
+    std::wstring theme;   // Theme name when kind=theme.
     unsigned long long size = 0;
 };
 
@@ -93,19 +93,19 @@ struct Setup {
     std::vector<PayloadItem> items;
     std::vector<ThemeGroup> themes;
     int hot = CID_NONE, pressed = CID_NONE;
-    // 安装进度
+    // Installation progress.
     int doneCount = 0, totalCount = 0;
     std::wstring currentFile;
     bool finished = false;
     std::wstring errorText;
     int errorCount = 0;
-    ID2D1Bitmap* logoBmp = nullptr;         // 标题栏标记（与主程序同一份资源）
+    ID2D1Bitmap* logoBmp = nullptr;         // Title-bar logo, shared with the main app.
     bool logoTried = false;
 };
 static Setup g_s;
 
 // ---------------------------------------------------------------------------
-//  工具
+// Helpers.
 // ---------------------------------------------------------------------------
 static std::wstring JoinPath(const std::wstring& a, const std::wstring& b) {
     if (a.empty()) return b;
@@ -142,7 +142,7 @@ static std::wstring DefaultInstallDir() {
     return JoinPath(JoinPath(buf, L"Programs"), kAppDisplay);
 }
 
-// 已注册的现版本或旧版本视为升级；也兼容卸载项丢失但目标目录已有程序的情况。
+// Treat registered versions or an existing executable at the destination as an upgrade.
 static bool HasExistingInstall() {
     for (const wchar_t* key : {
             L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DynamicWallpapers",
@@ -157,7 +157,7 @@ static bool HasExistingInstall() {
     return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// 读取内嵌清单，并按主题聚合出复选框列表
+// Read the embedded manifest and group theme files into checkbox entries.
 static void LoadManifest() {
     HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(RES_MANIFEST), RT_RCDATA);
     if (!res) return;
@@ -208,13 +208,13 @@ static void LoadManifest() {
 }
 
 // ---------------------------------------------------------------------------
-//  布局
+// Layout.
 // ---------------------------------------------------------------------------
 static void ComputeLayout(Layout& L) {
     float W = kWinW;
     L.captionMin   = D2D1::RectF(W - 88, 0, W - 44, Ui::TitleBarH);
     L.captionClose = D2D1::RectF(W - 44, 0, W, Ui::TitleBarH);
-    // 选项页
+    // Options page.
     L.dirBox    = D2D1::RectF(kPadX, 158, W - kPadX - 96, 194);
     L.browseBtn = D2D1::RectF(W - kPadX - 88, 158, W - kPadX, 194);
     L.chkDesktop    = D2D1::RectF(kPadX, 208, kPadX + 20, 228);
@@ -222,13 +222,13 @@ static void ComputeLayout(Layout& L) {
     L.chkAutoStart  = D2D1::RectF(kPadX, 276, kPadX + 20, 296);
     for (int i = 0; i < 4; ++i)
         L.themeChk[i] = D2D1::RectF(kPadX, 344 + i * 32, kPadX + 20, 364 + i * 32);
-    // 底部按钮（选项页用 取消/安装，完成页用 完成/立即运行，位置相同）
+    // Bottom buttons share positions: Cancel/Install on options, Finish/Launch now on completion.
     const float by = kWinH - 62;
     L.installBtn = D2D1::RectF(W - kPadX - 116, by, W - kPadX, by + Ui::ButtonH);
     L.cancelBtn  = D2D1::RectF(W - kPadX - 116 - 108, by, W - kPadX - 116 - 8, by + Ui::ButtonH);
     L.runBtn     = D2D1::RectF(W - kPadX - 116, by, W - kPadX, by + Ui::ButtonH);
     L.finishBtn  = D2D1::RectF(W - kPadX - 116 - 108, by, W - kPadX - 116 - 8, by + Ui::ButtonH);
-    // 进度页
+    // Progress page.
     L.progress   = D2D1::RectF(kPadX, 196, W - kPadX, 202);
 }
 
@@ -256,7 +256,7 @@ static int HitTest(float x, float y) {
 }
 
 // ---------------------------------------------------------------------------
-//  安装步骤
+// Installation steps.
 // ---------------------------------------------------------------------------
 static bool ExtractResource(int id, const std::wstring& destPath) {
     HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), RT_RCDATA);
@@ -295,7 +295,7 @@ static bool CreateShortcut(const std::wstring& lnk, const std::wstring& target,
     return ok;
 }
 
-// 写"应用和功能"卸载项
+// Register the Apps & features uninstall entry.
 static void WriteRegistry() {
     const wchar_t* uninst = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DynamicWallpapers";
     HKEY key = nullptr;
@@ -324,10 +324,10 @@ static void WriteRegistry() {
     RegCloseKey(key);
 }
 
-// 旧版本（TimeWall / 壁纸随时间变化）改名后安装目录、快捷方式、卸载项、自启项
-// 都换了名字：旧的那套不管的话，"应用和功能"里会留一个指向不存在文件的条目、
-// 开始菜单里多一个旧快捷方式、开机自启会去启动已删掉的旧 exe。
-// 旧目录里的 themes\ 先并进新目录（新目录没有的主题才拷，用户自加的不丢）。
+// The rename changed installation paths, shortcuts, uninstall entries, and startup entries.
+// Remove stale entries so Apps & features and the Start menu do not point to missing files,
+// and Windows startup does not attempt to launch an obsolete executable.
+// Merge missing themes from the old themes directory first to preserve user additions.
 static void CopyTree(const std::wstring& src, const std::wstring& dst) {
     EnsureDir(dst);
     WIN32_FIND_DATAW fd = {};
@@ -348,7 +348,7 @@ static void CleanLegacyInstall() {
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata);
     SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop);
 
-    // ① 旧安装目录：themes\ 里新目录没有的主题先搬过去，然后删掉整个旧目录
+    // 1. Copy missing user themes from the legacy install, then remove the old directory.
     std::wstring oldDir = JoinPath(JoinPath(local, L"Programs"), kLegacyAppName);
     if (GetFileAttributesW(oldDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
         std::wstring oldThemes = JoinPath(oldDir, L"themes");
@@ -372,18 +372,18 @@ static void CleanLegacyInstall() {
         PROCESS_INFORMATION pi = {};
         if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
                            nullptr, nullptr, &si, &pi)) {
-            WaitForSingleObject(pi.hProcess, 8000);    // 等它删完，别留个半拉的旧目录
+            WaitForSingleObject(pi.hProcess, 8000);    // Wait for deletion to finish before proceeding.
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
     }
-    // ② 旧快捷方式（开始菜单文件夹 + 桌面）
+    // 2. Remove legacy Start menu and desktop shortcuts.
     std::wstring smDir = JoinPath(JoinPath(appdata, L"Microsoft\\Windows\\Start Menu\\Programs"),
                                   kLegacyDisplay);
     DeleteFileW(JoinPath(smDir, std::wstring(kLegacyDisplay) + L".lnk").c_str());
     RemoveDirectoryW(smDir.c_str());
     DeleteFileW(JoinPath(desktop, std::wstring(kLegacyDisplay) + L".lnk").c_str());
-    // ③ 旧卸载项 / 旧自启项
+    // 3. Remove legacy uninstall and startup entries.
     RegDeleteTreeW(HKEY_CURRENT_USER,
                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\TimeWall");
     HKEY key = nullptr;
@@ -395,7 +395,7 @@ static void CleanLegacyInstall() {
     }
 }
 
-// 执行安装（分步更新界面；每步后处理一次消息以保持界面响应）
+// Install in stages, processing messages after each stage to keep the UI responsive.
 static void RunInstall() {
     g_s.totalCount = 0;
     for (auto& it : g_s.items) {
@@ -421,12 +421,12 @@ static void RunInstall() {
         }
         if (!ExtractResource(it.id, JoinPath(g_s.installDir, it.rel))) {
             g_s.errorCount++;
-            if (g_s.errorCount == 1) g_s.errorText = it.rel;   // 完成页只放得下一个文件名，其余用个数表达
+            if (g_s.errorCount == 1) g_s.errorText = it.rel;   // Show the first failed filename and summarize any additional errors by count.
         }
         g_s.doneCount++;
     };
 
-    // 更新现有安装前，先请运行中的程序退出（新旧两个类名都查：老进程可能还在跑）
+    // Request running apps to quit before updating; check both current and legacy window classes.
     for (const wchar_t* cls : { L"DynamicWallpapersMainWindow", L"TimeWallMainWindow" }) {
         if (HWND other = FindWindowW(cls, nullptr)) {
             PostMessageW(other, WM_APP_QUIT, 0, 0);
@@ -444,12 +444,12 @@ static void RunInstall() {
         step(it);
     }
 
-    // 快捷方式（带 --show：点快捷方式显示主界面）
+    // Shortcuts use --show to open the main window.
     std::wstring exe = JoinPath(g_s.installDir, kAppExe);
     wchar_t buf[MAX_PATH * 2] = {0};
     if (g_s.desktopLnk && SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, buf))) {
         std::wstring lnk = JoinPath(buf, std::wstring(kAppDisplay) + L".lnk");
-        CreateShortcut(lnk, exe, L"--show", L"按时间自动切换桌面壁纸", exe);
+        CreateShortcut(lnk, exe, L"--show", L"Automatically change desktop wallpapers on a schedule", exe);
     }
     if (g_s.startMenuLnk &&
         SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, buf))) {
@@ -457,19 +457,19 @@ static void RunInstall() {
                                     kAppDisplay);
         EnsureDir(dir);
         CreateShortcut(JoinPath(dir, std::wstring(kAppDisplay) + L".lnk"), exe, L"--show",
-                       L"按时间自动切换桌面壁纸", exe);
+                       L"Automatically change desktop wallpapers on a schedule", exe);
     }
-    // 开机自启
+    // Start with Windows.
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER,
                         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0,
                         KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
         if (g_s.autoStart) {
-            std::wstring cmd = L"\"" + exe + L"\" --autostart";   // 开机静默进托盘
+            std::wstring cmd = L"\"" + exe + L"\" --autostart";   // Start silently in the system tray.
             RegSetValueExW(key, kAppDisplay, 0, REG_SZ, (const BYTE*)cmd.c_str(),
                            (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
         }
-        RegDeleteValueW(key, kLegacyAppName);      // 老自启项清掉，注册表里只留一条
+        RegDeleteValueW(key, kLegacyAppName);      // Remove the old startup entry so only one remains.
         RegCloseKey(key);
     }
     WriteRegistry();
@@ -478,11 +478,11 @@ static void RunInstall() {
 }
 
 // ---------------------------------------------------------------------------
-//  绘制
+// Drawing.
 // ---------------------------------------------------------------------------
 static void DrawCaption(Gfx& g, const Palette& p) {
-    // 应用标记与主程序同一份 logo（exe 资源 IDR_LOGO_PNG）；
-    // 取不到时退回手绘的"左日右月"
+    // Use the same IDR_LOGO_PNG resource as the main app.
+    // Fall back to a hand-drawn sun and moon if it cannot be loaded.
     float ix = 28, iy = Ui::TitleBarH / 2;
     if (!g_s.logoBmp && !g_s.logoTried) {
         g_s.logoTried = true;
@@ -504,7 +504,7 @@ static void DrawCaption(Gfx& g, const Palette& p) {
         }
     }
     IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    g.text(std::wstring(kAppDisplay) + L" 安装程序", f, D2D1::RectF(48, 10, 420, 30), p.textPrimary);
+    g.text(std::wstring(kAppDisplay) + L" Setup", f, D2D1::RectF(48, 10, 420, 30), p.textPrimary);
     UiCaptionButton(g, g_s.L.captionMin, Ui::CAP_MIN, g_s.hot == CID_MIN, g_s.pressed == CID_MIN, p);
     UiCaptionButton(g, g_s.L.captionClose, Ui::CAP_CLOSE, g_s.hot == CID_CLOSE, g_s.pressed == CID_CLOSE, p);
 }
@@ -514,7 +514,7 @@ void RenderFrame() {
     const Palette& p = g_s.pal;
     if (!g.begin()) return;
     g.dc()->Clear(p.windowBgTop);
-    // 背景渐变
+    // Background gradient.
     ID2D1GradientStopCollection* stops = nullptr;
     D2D1_GRADIENT_STOP gs[2] = {{0.0f, p.windowBgTop}, {1.0f, p.windowBgBottom}};
     if (SUCCEEDED(g.dc()->CreateGradientStopCollection(gs, 2, &stops)) && stops) {
@@ -534,12 +534,12 @@ void RenderFrame() {
     IDWriteTextFormat* fSec   = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
 
     if (g_s.page == PAGE_OPTIONS) {
-        g.text(L"安装 " + std::wstring(kAppDisplay) + L" " + kVersion, fTitle,
+        g.text(L"Install " + std::wstring(kAppDisplay) + L" " + kVersion, fTitle,
                D2D1::RectF(kPadX, 62, kWinW - kPadX, 96), p.textPrimary);
-        g.text(L"桌面壁纸按时间自动切换：白天一张、夜间一张。无需管理员权限。", fSub,
+        g.text(L"Day and night wallpapers on a schedule. No administrator access needed.", fSub,
                D2D1::RectF(kPadX, 96, kWinW - kPadX, 120), p.textSecondary);
 
-        g.text(L"安装位置", fSec, D2D1::RectF(kPadX, 132, 200, 152), p.textSecondary);
+        g.text(L"Install location", fSec, D2D1::RectF(kPadX, 132, 200, 152), p.textSecondary);
         D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(g_s.L.dirBox, 6, 6);
         g.fillRound(rr, p.ctrlFill);
         g.strokeRound(rr, p.ctrlStroke, 1.0f);
@@ -547,34 +547,34 @@ void RenderFrame() {
         g.text(g_s.installDir, fPath,
                D2D1::RectF(g_s.L.dirBox.left + 12, g_s.L.dirBox.top + 10,
                            g_s.L.dirBox.right - 10, g_s.L.dirBox.bottom - 8), p.textPrimary);
-        UiButton(g, g_s.L.browseBtn, L"浏览…", p, false, g_s.hot == CID_BROWSE,
+        UiButton(g, g_s.L.browseBtn, L"Browse...", p, false, g_s.hot == CID_BROWSE,
                  g_s.pressed == CID_BROWSE);
 
-        UiCheckbox(g, g_s.L.chkDesktop.left, g_s.L.chkDesktop.top, L"创建桌面快捷方式",
+        UiCheckbox(g, g_s.L.chkDesktop.left, g_s.L.chkDesktop.top, L"Create a desktop shortcut",
                    g_s.desktopLnk, g_s.hot == CID_CHK_DESKTOP, p);
-        UiCheckbox(g, g_s.L.chkStartMenu.left, g_s.L.chkStartMenu.top, L"创建开始菜单快捷方式",
+        UiCheckbox(g, g_s.L.chkStartMenu.left, g_s.L.chkStartMenu.top, L"Create a Start menu shortcut",
                    g_s.startMenuLnk, g_s.hot == CID_CHK_STARTMENU, p);
-        UiCheckbox(g, g_s.L.chkAutoStart.left, g_s.L.chkAutoStart.top, L"开机自动启动",
+        UiCheckbox(g, g_s.L.chkAutoStart.left, g_s.L.chkAutoStart.top, L"Start with Windows",
                    g_s.autoStart, g_s.hot == CID_CHK_AUTOSTART, p);
 
-        g.text(L"附带壁纸主题", fSec, D2D1::RectF(kPadX, 314, 300, 334), p.textSecondary);
+        g.text(L"Included wallpaper themes", fSec, D2D1::RectF(kPadX, 314, 300, 334), p.textSecondary);
         for (int i = 0; i < (int)g_s.themes.size() && i < 4; ++i) {
-            std::wstring label = g_s.themes[i].name + L"（" +
-                std::to_wstring(g_s.themes[i].imageCount) + L" 张图片 · " +
-                FormatSize(g_s.themes[i].size) + L"）";
+            std::wstring label = g_s.themes[i].name + L" (" +
+                std::to_wstring(g_s.themes[i].imageCount) + L" images · " +
+                FormatSize(g_s.themes[i].size) + L")";
             UiCheckbox(g, g_s.L.themeChk[i].left, g_s.L.themeChk[i].top, label,
                        g_s.themes[i].include, g_s.hot == CID_THEME0 + i, p);
         }
 
-        UiButton(g, g_s.L.cancelBtn, L"取消", p, false, g_s.hot == CID_CANCEL,
+        UiButton(g, g_s.L.cancelBtn, L"Cancel", p, false, g_s.hot == CID_CANCEL,
                  g_s.pressed == CID_CANCEL);
-        UiButton(g, g_s.L.installBtn, L"安装", p, true, g_s.hot == CID_INSTALL,
+        UiButton(g, g_s.L.installBtn, L"Install", p, true, g_s.hot == CID_INSTALL,
                  g_s.pressed == CID_INSTALL, true, L"\uE896");
     } else if (g_s.page == PAGE_INSTALLING) {
-        g.text(L"正在安装…", fTitle, D2D1::RectF(kPadX, 78, kWinW - kPadX, 112), p.textPrimary);
+        g.text(L"Installing...", fTitle, D2D1::RectF(kPadX, 78, kWinW - kPadX, 112), p.textPrimary);
         float prog = g_s.totalCount ? (float)g_s.doneCount / g_s.totalCount : 0.0f;
         UiProgress(g, g_s.L.progress, prog, p);
-        std::wstring line = g_s.currentFile.empty() ? L"准备中…" : g_s.currentFile;
+        std::wstring line = g_s.currentFile.empty() ? L"Preparing..." : g_s.currentFile;
         g.text(line, fSub, D2D1::RectF(kPadX, 220, kWinW - kPadX, 244), p.textSecondary);
         wchar_t buf[64];
         swprintf(buf, 64, L"%d / %d", g_s.doneCount, g_s.totalCount);
@@ -582,29 +582,30 @@ void RenderFrame() {
         g.textOptical(buf, fRight, D2D1::RectF(kWinW / 2, 220, kWinW - kPadX, 244),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     } else {
-        g.text(g_s.errorText.empty() ? L"安装完成" : L"安装完成（有错误）", fTitle,
+        g.text(g_s.errorText.empty() ? L"Installation complete" : L"Installation completed with errors", fTitle,
                D2D1::RectF(kPadX, 78, kWinW - kPadX, 112), p.textPrimary);
-        IDWriteTextFormat* fBody = g.format(FONT_UI, 13.0f);
+        IDWriteTextFormat* fBody = g.format(FONT_UI, 13.0f, DWRITE_FONT_WEIGHT_NORMAL,
+                                          DWRITE_TEXT_ALIGNMENT_LEADING, true);
         std::wstring body = g_s.errorText.empty()
-            ? L"已经装好了。程序会常驻托盘，按设定的时间自动切换壁纸。"
-            : (L"有 " + std::to_wstring(g_s.errorCount) + L" 个文件写入失败：" + g_s.errorText);
-        g.text(body, fBody, D2D1::RectF(kPadX, 124, kWinW - kPadX, 148),
+            ? L"Ready to use. The app runs in the system tray and switches wallpapers automatically."
+            : (L"Failed to write " + std::to_wstring(g_s.errorCount) + L" file(s): " + g_s.errorText);
+        g.text(body, fBody, D2D1::RectF(kPadX, 124, kWinW - kPadX, 168),
                g_s.errorText.empty() ? p.textSecondary : p.accent);
-        g.text(L"安装位置：" + g_s.installDir, fBody,
-               D2D1::RectF(kPadX, 156, kWinW - kPadX, 180), p.textSecondary);
-        g.text(L"提示：右键托盘图标可以随时切换主题、暂停切换或退出。", fBody,
-               D2D1::RectF(kPadX, 184, kWinW - kPadX, 208), p.textSecondary);
+        g.text(L"Installed in: " + g_s.installDir, fBody,
+               D2D1::RectF(kPadX, 176, kWinW - kPadX, 220), p.textSecondary);
+        g.text(L"Right-click the tray icon to change settings, pause switching, or quit.", fBody,
+               D2D1::RectF(kPadX, 228, kWinW - kPadX, 272), p.textSecondary);
 
-        UiButton(g, g_s.L.finishBtn, L"完成", p, false, g_s.hot == CID_FINISH,
+        UiButton(g, g_s.L.finishBtn, L"Finish", p, false, g_s.hot == CID_FINISH,
                  g_s.pressed == CID_FINISH);
-        UiButton(g, g_s.L.runBtn, L"立即运行", p, true, g_s.hot == CID_RUN,
+        UiButton(g, g_s.L.runBtn, L"Launch now", p, true, g_s.hot == CID_RUN,
                  g_s.pressed == CID_RUN, true, L"\uE768");
     }
     g.end();
 }
 
 // ---------------------------------------------------------------------------
-//  窗口过程
+// Window procedure.
 // ---------------------------------------------------------------------------
 static void PickFolder() {
     IFileDialog* dlg = nullptr;
@@ -614,7 +615,7 @@ static void PickFolder() {
     DWORD opts = 0;
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    dlg->SetTitle(L"选择安装位置");
+    dlg->SetTitle(L"Choose install location");
     if (SUCCEEDED(dlg->Show(g_s.hwnd))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dlg->GetResult(&item))) {
@@ -632,7 +633,7 @@ static void PickFolder() {
 static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
     case WM_NCCALCSIZE:
-        if (w) return 0;               // 客户区铺满整个窗口（去系统标题栏）
+        if (w) return 0;               // Extend the client area over the system title bar.
         break;
     case WM_NCHITTEST: {
         POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
@@ -691,7 +692,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         switch (id) {
         case CID_MIN: ShowWindow(h, SW_MINIMIZE); break;
         case CID_CLOSE:
-            if (g_s.page == PAGE_INSTALLING) break;   // 安装中不许关：文件写到一半没有"取消"语义
+            if (g_s.page == PAGE_INSTALLING) break;   // Do not close halfway through writing installation files.
             DestroyWindow(h);
             break;
         case CID_CANCEL: DestroyWindow(h); break;
@@ -701,15 +702,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         case CID_CHK_AUTOSTART: g_s.autoStart = !g_s.autoStart; break;
         case CID_INSTALL:
             if (g_s.items.empty()) {
-                MessageBoxW(h, L"安装包数据缺失（payload 资源为空）", kAppDisplay,
+                MessageBoxW(h, L"Installer data is missing (empty payload resources).", kAppDisplay,
                             MB_OK | MB_ICONERROR);
                 break;
             }
             if (!HasExistingInstall() &&
                 MessageBoxW(h,
-                    L"Dynamic Wallpapers 与 Wallpaper Engine 同时运行时可能相互覆盖壁纸，导致壁纸切换异常。\n\n"
-                    L"建议使用本软件时退出或暂停 Wallpaper Engine。\n\n是否继续安装？",
-                    L"壁纸软件冲突提醒", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+                    L"Running Dynamic Wallpapers and Wallpaper Engine together may cause them to overwrite each other's wallpapers.\n\n"
+                    L"Please quit or pause Wallpaper Engine while using this app.\n\nContinue installing?",
+                    L"Wallpaper app conflict", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
                 break;
             RunInstall();
             break;
@@ -731,11 +732,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         InvalidateRect(h, nullptr, FALSE);
         return 0;
     }
-    case WM_APP_QUIT:                  // 主程序卸载/更新时请求本窗口退出
+    case WM_APP_QUIT:                  // The main app requests shutdown during uninstall or update.
         DestroyWindow(h);
         return 0;
     case WM_CLOSE:
-        if (g_s.page == PAGE_INSTALLING) return 0;   // 与 CID_CLOSE 同款拦截（Alt+F4 / 系统菜单）
+        if (g_s.page == PAGE_INSTALLING) return 0;   // Apply the same close guard for Alt+F4 and the system menu.
         DestroyWindow(h);
         return 0;
     case WM_DESTROY:
@@ -766,7 +767,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     int h = (int)(kWinH * dpi / 96.0f + 0.5f);
     int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
-    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, kWindowClass, L"Dynamic Wallpapers 安装程序",
+    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, kWindowClass, L"Dynamic Wallpapers Setup",
                                 WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
                                 sx, sy, w, h, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
@@ -779,7 +780,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     g_s.pal = MakePalette(SystemUsesDarkMode(), SystemAccentColor());
     if (!g_s.gfx.init(hwnd)) {
-        MessageBoxW(nullptr, L"图形初始化失败", kAppDisplay, MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Graphics initialization failed.", kAppDisplay, MB_OK | MB_ICONERROR);
         return 2;
     }
     g_s.gfx.resize(w, h, dpi);

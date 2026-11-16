@@ -1,13 +1,13 @@
-# 构建产物（安装包/便携版发布到 GitHub Releases，不进仓库）
+# Build outputs go to GitHub Releases, not Git.
 dist/
 
-# 中间构建文件
+# Intermediate build files.
 *.o
 *.obj
 *.res
 __pycache__/
 
-# 系统 / 编辑器
+# Operating system and editor files.
 Thumbs.db
 .DS_Store
 .vscode/

@@ -1,17 +1,17 @@
 // ============================================================================
-//  gfx.cpp — 渲染层实现
+// gfx.cpp - Graphics implementation.
 // ============================================================================
 #include "gfx.h"
 #include <wincodec.h>
 #include <d2d1helper.h>
 #include <algorithm>
 
-// 兼容旧版 SDK：这些 DWM 属性/常量在 MinGW 老头文件里可能没有
+// Compatibility definitions for DWM constants missing from older MinGW SDK headers.
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-// DComp 的 IID（MinGW 头文件未导出该符号，这里自行声明）
+// Declare the DComp IID not exported by MinGW headers.
 static const GUID kIID_IDCompositionDevice =
     {0xc37ea93a, 0xe7aa, 0x450d, {0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3}};
 
@@ -24,7 +24,7 @@ bool Gfx::init(HWND hwnd) {
     dpi_ = GetDpiForWindow(hwnd);
     if (!dpi_) dpi_ = 96;
 
-    // 失败统一走 bail：局部 DXGI 对象和已建好的成员一起放干净，不留半初始化状态
+    // On failure, release local DXGI objects and initialized members through bail.
     IDXGIDevice* dxgiDevice = nullptr;
     IDXGIAdapter* adapter = nullptr;
     IDXGIFactory2* dxgiFactory = nullptr;
@@ -36,7 +36,7 @@ bool Gfx::init(HWND hwnd) {
         return false;
     };
 
-    // ---- D3D11 设备（BGRA 支持是 D2D 互操作的前提）----
+    // D3D11 device; BGRA support is required for Direct2D interoperability.
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     D3D_FEATURE_LEVEL level;
     if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
@@ -53,7 +53,7 @@ bool Gfx::init(HWND hwnd) {
         return bail();
     if (FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_)))
         return bail();
-    // 透明底上用灰度抗锯齿，避免 ClearType 出现彩边
+    // Use grayscale antialiasing to avoid ClearType color fringes on transparent backgrounds.
     dc_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     dc_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     dc_->SetDpi((float)dpi_, (float)dpi_);
@@ -64,7 +64,7 @@ bool Gfx::init(HWND hwnd) {
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                      __uuidof(IWICImagingFactory), (void**)&wic_);
 
-    // ---- 交换链（组合用交换链，支持预乘透明）----
+    // Composition swap chain with premultiplied alpha.
     if (FAILED(dxgiDevice->GetAdapter(&adapter)) || !adapter) return bail();
     if (FAILED(adapter->GetParent(IID_IDXGIFactory2, (void**)&dxgiFactory)) || !dxgiFactory)
         return bail();
@@ -75,9 +75,9 @@ bool Gfx::init(HWND hwnd) {
     if (w_ == 0) w_ = 1;
     if (h_ == 0) h_ = 1;
 
-    // 交换链一次开成"整块显示器"大小：窗口在动画中逐帧变大变小时只改可见区域、
-    // 不重建缓冲。每帧 ResizeBuffers + 重建 D2D 目标实测要 4~13ms，120Hz 屏上
-    // 一帧吃掉两个刷新周期。窗口本身被 DWM 裁到自己的尺寸，多出的缓冲看不到。
+    // Allocate a monitor-sized buffer once and change only the visible area during animations.
+    // Resizing buffers and rebuilding the target each frame costs 4-13 ms, too much at 120 Hz.
+    // DWM clips the oversized buffer to the window bounds.
     bufW_ = w_; bufH_ = h_;
     MONITORINFO mi; mi.cbSize = sizeof(mi);
     if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi)) {
@@ -99,7 +99,7 @@ bool Gfx::init(HWND hwnd) {
     if (FAILED(dxgiFactory->CreateSwapChainForComposition(d3d_, &sd, nullptr, &swap_)))
         return bail();
 
-    // ---- DComp 视觉树：交换链挂到窗口上 ----
+    // Attach the swap chain to the window through the DComp visual tree.
     if (FAILED(DCompositionCreateDevice(dxgiDevice, kIID_IDCompositionDevice, (void**)&dcomp_)))
         return bail();
     if (FAILED(dcomp_->CreateTargetForHwnd(hwnd, TRUE, &dcompTarget_))) return bail();
@@ -141,9 +141,9 @@ void Gfx::resize(UINT physicalW, UINT physicalH, UINT dpi) {
     dpi_ = dpi;
     bool growBuffer = w_ > bufW_ || h_ > bufH_;
 
-    // 正常情况下这里只记下窗口大小：缓冲是整块显示器尺寸，窗口 = 缓冲的可见
-    // 区域（左上角），逐帧改窗口大小不碰 DXGI。只有窗口长到超出缓冲（换显示器）
-    // 才重建缓冲；DPI 只改变坐标映射，不需要重新分配 GPU 内存。
+    // Normally, update only the window dimensions: its visible area starts at the buffer origin.
+    // Reallocate only when the window exceeds the buffer, for example after changing monitors.
+    // DPI changes update coordinate mapping without reallocating GPU memory.
     if (growBuffer || dpiChanged) {
         if (target_) { dc_->SetTarget(nullptr); target_->Release(); target_ = nullptr; }
     }
@@ -153,11 +153,11 @@ void Gfx::resize(UINT physicalW, UINT physicalH, UINT dpi) {
         if (SUCCEEDED(swap_->ResizeBuffers(0, nw, nh, DXGI_FORMAT_UNKNOWN, 0))) {
             bufW_ = nw; bufH_ = nh;
         }
-        // ResizeBuffers 失败（设备被移除等）也要把目标位图建回来：旧缓冲还在，画面
-        // 暂时不跟窗口大小走，好过 target_ 空着、begin() 从此失败、黑屏到重启
+        // Recreate the target even if ResizeBuffers fails, using the old buffer if necessary.
+        // A temporarily mismatched size is preferable to leaving begin() without a target.
     }
     if (growBuffer || dpiChanged) {
-        // 目标位图的 DPI 在创建时指定；只重建视图，复用交换链的像素缓冲。
+        // Target DPI is set at creation; rebuild the view while reusing swap-chain pixels.
         createTargetFromSwapChain();
         dc_->SetDpi((float)dpi_, (float)dpi_);
     }
@@ -191,7 +191,7 @@ bool Gfx::begin() {
 void Gfx::end() {
     HRESULT hr = dc_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
-        // 设备丢失：重建目标位图（罕见，但必须处理）
+        // Recreate the target after device loss.
         if (target_) { dc_->SetTarget(nullptr); target_->Release(); target_ = nullptr; }
         createTargetFromSwapChain();
         return;
@@ -206,7 +206,7 @@ ID2D1SolidColorBrush* Gfx::brush(const D2D1_COLOR_F& color) {
     ID2D1SolidColorBrush* b = nullptr;
     if (SUCCEEDED(dc_->CreateSolidColorBrush(color, &b))) {
         brushes_.push_back({color, b});
-        if (brushes_.size() > 64) {   // 缓存上限，防止无限增长
+        if (brushes_.size() > 64) {   // Bound the cache to prevent unlimited growth.
             brushes_.front().second->Release();
             brushes_.erase(brushes_.begin());
         }
@@ -223,7 +223,7 @@ IDWriteTextFormat* Gfx::format(const wchar_t* families, float dipSize,
             f.first.align == key.align && f.first.wrap == key.wrap)
             return f.second;
 
-    // families 支持 "A,B,C"：逐个尝试，全部失败则交给 DWrite 兜底
+    // Try comma-separated font families in order, then let DirectWrite choose a fallback.
     std::wstring list = families;
     IDWriteTextFormat* fmt = nullptr;
     size_t start = 0;
@@ -233,7 +233,7 @@ IDWriteTextFormat* Gfx::format(const wchar_t* families, float dipSize,
         if (!one.empty() &&
             SUCCEEDED(dwrite_->CreateTextFormat(one.c_str(), nullptr, weight,
                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                                dipSize, L"zh-cn", &fmt)))
+                                                dipSize, L"en-us", &fmt)))
             break;
         if (comma == std::wstring::npos) break;
         start = comma + 1;
@@ -242,13 +242,13 @@ IDWriteTextFormat* Gfx::format(const wchar_t* families, float dipSize,
     fmt->SetTextAlignment(align);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     fmt->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
-    // 关闭行距微调，Windows 11 文字排版默认值
+    // Use the Windows 11 default line-spacing behavior.
     fmt->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_DEFAULT, 0, 0);
     formats_.push_back({key, fmt});
     return fmt;
 }
 
-// 把已打开的解码器变成 D2D 位图（从文件 / 从 exe 资源两条入口共用）
+// Convert an open WIC decoder to a D2D bitmap; shared by file and resource loading.
 static ID2D1Bitmap* BitmapFromDecoder(IWICImagingFactory* wic, ID2D1DeviceContext* dc,
                                        IWICBitmapDecoder* dec, UINT maxWidthPx) {
     IWICBitmapFrameDecode* frame = nullptr;
@@ -289,8 +289,8 @@ ID2D1Bitmap* Gfx::loadImage(const std::wstring& path, UINT maxWidthPx) {
     return bmp;
 }
 
-// 标题栏标记：从 exe 的 RCDATA 资源解码。资源字节走 HGLOBAL 内存流交给 WIC，
-// 不落临时文件、也不依赖程序目录里有没有图片。
+// Decode the title-bar logo from RCDATA using an HGLOBAL stream passed to WIC.
+// No temporary files or external image dependencies are needed.
 ID2D1Bitmap* Gfx::loadImageFromResource(int resId, UINT maxWidthPx) {
     if (!wic_ || !dc_) return nullptr;
     HRSRC res = FindResourceW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(resId), RT_RCDATA);
@@ -323,7 +323,7 @@ void Gfx::fillRound(const D2D1_ROUNDED_RECT& r, const D2D1_COLOR_F& c) {
     if (b) dc_->FillRoundedRectangle(r, b);
 }
 
-// 从内存像素建位图（B8G8R8A8 预乘）——毛玻璃的颗粒噪点用它
+// Create a bitmap from premultiplied B8G8R8A8 pixels for frosted-background noise.
 ID2D1Bitmap* Gfx::createBitmapFromPixels(const void* pixels, UINT w, UINT h) {
     if (!dc_ || !pixels || !w || !h) return nullptr;
     D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
@@ -362,10 +362,10 @@ float Gfx::textWidth(const std::wstring& s, IDWriteTextFormat* fmt) {
     return tm.widthIncludingTrailingWhitespace;
 }
 
-// 墨迹垂直居中：overhang 是相对"布局盒"而不是文本高度的——
+// Center the glyph ink vertically: overhang is relative to the layout box, not text height.
 //   inkTop    = -om.top
-//   inkBottom = 盒高 + om.bottom（om.bottom 为负时表示墨迹在盒内）
-// 用 tm.height 去加会把下边界算成很大的负数，文字就被画到天上去了。
+// inkBottom = box height + om.bottom; a negative bottom overhang lies inside the box.
+// Adding tm.height instead can produce a large negative bound and move text offscreen.
 void Gfx::textOptical(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
                       const D2D1_COLOR_F& c, DWRITE_TEXT_ALIGNMENT align) {
     if (!fmt || s.empty()) return;
@@ -389,7 +389,7 @@ void Gfx::textOptical(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_
     float textW = tm.widthIncludingTrailingWhitespace;
     if (align == DWRITE_TEXT_ALIGNMENT_CENTER)        x = r.left + (boxW - textW) / 2.0f;
     else if (align == DWRITE_TEXT_ALIGNMENT_TRAILING) x = r.right - textW;
-    // 让墨迹中心落在控件中心
+    // Align the ink center with the control center.
     float y = (r.top + r.bottom) / 2.0f - (inkTop + inkBottom) / 2.0f;
     dc_->DrawTextLayout(D2D1::Point2F(x, y), layout, b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
     layout->Release();

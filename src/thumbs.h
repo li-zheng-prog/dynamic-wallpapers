@@ -16,10 +16,10 @@ struct ThumbRequest {
 struct ThumbResult {
     ThumbRequest request;
     UINT width = 0, height = 0;
-    std::vector<BYTE> pixels;             // PBGRA；GPU 位图由界面线程创建
+    std::vector<BYTE> pixels;             // PBGRA pixels; the UI thread creates the GPU bitmap.
 };
 
-// 一个后台线程顺序解码；待办始终只保留当前视口及缓冲行。
+// One background decoder thread; pending work includes only the viewport and buffer rows.
 class ThumbLoader {
 public:
     ~ThumbLoader() { stop(); }

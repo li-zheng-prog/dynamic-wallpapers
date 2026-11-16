@@ -1,5 +1,5 @@
 // ============================================================================
-//  core.cpp — 业务核心实现
+// core.cpp - Core application logic.
 // ============================================================================
 #include "core.h"
 #include <shobjidl.h>
@@ -9,8 +9,8 @@
 #include <cwchar>
 #include <algorithm>
 
-// FOF_* 是稳定 ABI 的位标志：0x40=可撤销(移到回收站) 0x10=不确认 0x04=静默 0x400=无错误 UI。
-// MinGW 在较新的 NTDDI_VERSION 下可能不暴露，缺了就用标准值补上。
+// Stable FOF_* ABI flags: 0x40=undo/recycle, 0x10=no confirmation, 0x04=silent, 0x400=no error UI.
+// Provide standard values when newer NTDDI_VERSION settings hide them in MinGW headers.
 #ifndef FOF_ALLOWUNDO
 #define FOF_ALLOWUNDO 0x0040
 #endif
@@ -30,12 +30,12 @@
 
 static const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const wchar_t* kAppName = L"Dynamic Wallpapers";
-static const wchar_t* kLegacyName = L"TimeWall";              // 旧内部名：配置目录、自启项、卸载项
-static const wchar_t* kIniSection = L"Dynamic Wallpapers";    // config.ini 的段名
-static const wchar_t* kLegacyIniSection = L"TimeWall";        // 旧段名：读到就迁到新段
+static const wchar_t* kLegacyName = L"TimeWall";              // Legacy internal name for settings, startup, and uninstall entries.
+static const wchar_t* kIniSection = L"Dynamic Wallpapers";    // Current config.ini section.
+static const wchar_t* kLegacyIniSection = L"TimeWall";        // Migrate this legacy section when reading settings.
 
 // ---------------------------------------------------------------------------
-//  路径工具
+// Path helpers.
 // ---------------------------------------------------------------------------
 std::wstring JoinPath(const std::wstring& a, const std::wstring& b) {
     if (a.empty()) return b;
@@ -62,10 +62,10 @@ std::wstring ExeDir() {
     return s == std::wstring::npos ? L"" : p.substr(0, s);
 }
 
-// 更名迁移（2026-09-29）：老版本叫 TimeWall，配置在 %APPDATA%\TimeWall。首次以
-// 新名字启动时把整个目录搬到 %APPDATA%\Dynamic Wallpapers——设置与自加主题不丢。
-// 只做一次、只在新目录不存在时才搬；搬不动就退一步只拷 config.ini，
-// 主题由 ThemeDirs() 里的旧路径继续兜底扫描。
+// Name migration (2026-09-29): TimeWall stored settings in %APPDATA%\TimeWall.
+// Move the directory to %APPDATA%\Dynamic Wallpapers to preserve settings and user themes.
+// Only migrate if the new directory is absent; fall back to copying config.ini if moving fails.
+// ThemeDirs() continues scanning the legacy path as a fallback.
 static void MigrateLegacyAppData(const std::wstring& appdata, const std::wstring& newDir) {
     static bool done = false;
     if (done) return;
@@ -98,9 +98,9 @@ std::wstring ConfigPath() {
     return path;
 }
 
-// 主题搜索目录：1) 程序（安装）目录 themes\（随程序安装的主题 + 用户自加主题）
-//               2) %APPDATA%\Dynamic Wallpapers\themes\（用户目录）
-//               3) %APPDATA%\TimeWall\themes\（旧路径，迁移失败时兜底）
+// Theme search order: 1) themes beside the executable (bundled and user-added themes).
+// 2) %APPDATA%\Dynamic Wallpapers\themes (user directory).
+// 3) %APPDATA%\TimeWall\themes (fallback if migration fails).
 std::vector<std::wstring> ThemeDirs() {
     std::vector<std::wstring> dirs;
     dirs.push_back(JoinPath(ExeDir(), L"themes"));
@@ -115,7 +115,7 @@ std::vector<std::wstring> ThemeDirs() {
 }
 
 // ---------------------------------------------------------------------------
-//  配置读写（INI；系统 API 自动处理 UTF-16）
+// INI settings; the Windows API handles UTF-16.
 // ---------------------------------------------------------------------------
 static std::wstring ReadIniRaw(const wchar_t* section, const wchar_t* key) {
     wchar_t buf[512] = {0};
@@ -123,8 +123,8 @@ static std::wstring ReadIniRaw(const wchar_t* section, const wchar_t* key) {
     return buf;
 }
 
-// 新段读不到时去老段（[TimeWall]）读——老用户的 config.ini 不用手动改，
-// SaveConfig 会把值写进新段并删掉老段。
+// Fall back to the legacy [TimeWall] section when the current section is absent.
+// SaveConfig writes the current section and removes the legacy one.
 static int GetInt(const wchar_t* key, int def) {
     std::wstring s = ReadIniRaw(kIniSection, key);
     if (s.empty()) s = ReadIniRaw(kLegacyIniSection, key);
@@ -158,7 +158,7 @@ Config LoadConfig() {
     c.wallpaperStyle = GetInt(L"WallpaperStyle", 4);
     c.appearance   = GetInt(L"Appearance", 0);
     if (c.appearance < 0 || c.appearance > 2) c.appearance = 0;
-    // 容错：时间必须在 0..1439，且不能相同
+    // Keep times distinct and within 0..1439 minutes.
     auto clamp = [](int v) { return v < 0 ? 0 : (v > 1439 ? 1439 : v); };
     c.dayStart = clamp(c.dayStart);
     c.nightStart = clamp(c.nightStart);
@@ -178,12 +178,12 @@ void SaveConfig(const Config& c) {
     PutInt(L"MinimizeToTray", c.minimizeToTray ? 1 : 0);
     PutInt(L"WallpaperStyle", c.wallpaperStyle);
     PutInt(L"Appearance", c.appearance);
-    // 值都写进新段后删掉老段（[TimeWall]），config.ini 里只留一份
+    // Remove [TimeWall] after writing all values to the current section.
     WritePrivateProfileStringW(kLegacyIniSection, nullptr, nullptr, ConfigPath().c_str());
 }
 
 // ---------------------------------------------------------------------------
-//  主题扫描
+// Theme discovery.
 // ---------------------------------------------------------------------------
 static bool IsImageFile(const std::wstring& name) {
     size_t dot = name.find_last_of(L'.');
@@ -193,7 +193,7 @@ static bool IsImageFile(const std::wstring& name) {
     return ext == L".jpg" || ext == L".jpeg" || ext == L".png" || ext == L".bmp";
 }
 
-// 从文件名里取末尾数字（The Desert_5.jpg -> 5），用于自然排序与索引匹配
+// Extract the trailing number (The Desert_5.jpg -> 5) for natural sorting and index matching.
 static int TrailingNumber(const std::wstring& file) {
     size_t dot = file.find_last_of(L'.');
     std::wstring stem = dot == std::wstring::npos ? file : file.substr(0, dot);
@@ -219,7 +219,7 @@ static void ListImages(const std::wstring& folder, std::vector<std::wstring>& ou
     });
 }
 
-// ---- theme.json 的极简解析（只认我们需要的字段）----
+// Minimal theme.json parsing: only the fields needed by this app.
 static bool JsonString(const std::wstring& js, const wchar_t* key, std::wstring& out) {
     std::wstring pat = std::wstring(L"\"") + key + L"\"";
     size_t p = js.find(pat);
@@ -252,7 +252,7 @@ static bool JsonIntArray(const std::wstring& js, const wchar_t* key, std::vector
     return !out.empty();
 }
 
-// 把 theme.json 的 imageFilename 模板（如 "The Desert_*.jpg"）解析成真实文件名
+// Resolve an imageFilename pattern such as "The Desert_*.jpg" to an actual file.
 static std::wstring ResolveImageName(const std::wstring& folder, const std::wstring& pattern,
                                      int index, const std::vector<std::wstring>& files) {
     if (!pattern.empty()) {
@@ -264,7 +264,7 @@ static std::wstring ResolveImageName(const std::wstring& folder, const std::wstr
         } else if (FileExists(JoinPath(folder, name))) {
             return name;
         }
-        // 模板没匹配上：退化为"文件名含该数字"
+        // If the pattern fails, fall back to a filename containing the number.
         for (auto& f : files)
             if (TrailingNumber(f) == index) return f;
     }
@@ -295,7 +295,7 @@ static bool LoadTheme(const std::wstring& folder, const std::wstring& folderName
                 int wlen = MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)read, nullptr, 0);
                 json.resize(wlen);
                 MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)read, &json[0], wlen);
-                // 去掉 UTF-8 BOM 转成的 U+FEFF
+                // Remove U+FEFF decoded from a UTF-8 BOM.
                 if (!json.empty() && json[0] == 0xFEFF) json.erase(0, 1);
             }
             CloseHandle(h);
@@ -317,14 +317,14 @@ static bool LoadTheme(const std::wstring& folder, const std::wstring& folderName
         JsonIntArray(json, L"sunsetImageList", sunsetList);
     }
 
-    // 取值规则：日间 = dayImageList 第一张（没有则用 sunrise 最后一张）；
-    //           夜间 = nightImageList 第一张（没有则用 sunset 最后一张）
+    // Day: first dayImageList entry, or last sunriseImageList entry as a fallback.
+    // Night: first nightImageList entry, or last sunsetImageList entry as a fallback.
     if (!dayList.empty())        dayName = ResolveImageName(folder, pattern, dayList.front(), files);
     else if (!sunriseList.empty()) dayName = ResolveImageName(folder, pattern, sunriseList.back(), files);
     if (!nightList.empty())      nightName = ResolveImageName(folder, pattern, nightList.front(), files);
     else if (!sunsetList.empty()) nightName = ResolveImageName(folder, pattern, sunsetList.back(), files);
 
-    // 没有 theme.json（或字段缺失）时：第一张当白天，最后一张当夜晚
+    // If theme.json or its fields are absent, use the first and last images for day and night.
     if (dayName.empty()) dayName = files.front();
     if (nightName.empty()) nightName = files.size() > 1 ? files.back() : files.front();
 
@@ -345,7 +345,7 @@ std::vector<ThemeInfo> ScanThemes() {
             if (name == L"." || name == L"..") continue;
             ThemeInfo t;
             if (LoadTheme(JoinPath(dir, name), name, t) && t.valid()) {
-                bool dup = false;   // 同名主题只保留第一个（exe 目录优先）
+                bool dup = false;   // Keep the first theme with each name; the executable directory takes priority.
                 for (auto& e : out) if (e.name == t.name) dup = true;
                 if (!dup) out.push_back(t);
             }
@@ -360,16 +360,16 @@ std::vector<ThemeInfo> ScanThemes() {
 
 const ThemeInfo* FindTheme(const std::vector<ThemeInfo>& list, const std::wstring& name) {
     for (auto& t : list) if (t.name == name) return &t;
-    // 唯一调用方是 --delete-theme=<名字>：退回"第一个"会让名字打错时
-    // 把别的主题移进回收站；返回码 2（没这个主题）也会变成不可达。
+    // The caller, --delete-theme=<name>, must not fall back to the first theme on a typo.
+    // Return no match so exit code 2 remains meaningful and unrelated themes stay safe.
     return nullptr;
 }
 
 // ---------------------------------------------------------------------------
-//  用户自定义主题（"添加主题"）
+// User themes (Add theme).
 // ---------------------------------------------------------------------------
-// 目录可写性探测：真写一个小文件试试（装在 Program Files 又没权限时会被拒绝）
-static void EnsureDir(const std::wstring& dir);      // 定义见下方
+// Probe write access with a small file, including restricted Program Files installs.
+static void EnsureDir(const std::wstring& dir);      // Defined below.
 static bool DirWritable(const std::wstring& dir) {
     EnsureDir(dir);
     std::wstring probe = JoinPath(dir, L".write_test");
@@ -380,9 +380,9 @@ static bool DirWritable(const std::wstring& dir) {
     return true;
 }
 
-// 用户主题目录 = 程序（安装）目录下的 themes\：添加主题时把图片复制进这个独立
-// 文件夹，放好之后与原始图片再无关系。程序目录不可写（Program Files）时自动
-// 退回 %APPDATA%\Dynamic Wallpapers\themes。
+// Prefer the themes directory beside the executable. Imported images are independent copies.
+// If this location is not writable (for example, Program Files), fall back to
+// %APPDATA%\Dynamic Wallpapers\themes.
 std::wstring UserThemeDir() {
     std::wstring prog = JoinPath(ExeDir(), L"themes");
     if (DirWritable(prog)) return prog;
@@ -391,7 +391,7 @@ std::wstring UserThemeDir() {
     return app;
 }
 
-// 逐级创建目录（已存在时忽略错误）
+// Create parent directories; existing directories are harmless.
 static void EnsureDir(const std::wstring& dir) {
     std::wstring cur;
     for (size_t i = 0; i < dir.size(); ++i) {
@@ -424,9 +424,9 @@ static bool DirExists(const std::wstring& p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// 名字是否已被任何主题目录占用：文件夹名（不区分大小写）或某个主题的显示名。
-// ScanThemes 按显示名去重、exe 目录优先——只查自己目录的话，撞名的主题会被
-// 去重顶掉，看起来"添加/改名成功却找不到"。exceptFolder 是"自己"，跳过。
+// Check all theme roots for a case-insensitive folder name or display name collision.
+// ScanThemes deduplicates names with executable-directory priority; checking only one root
+// could hide a newly added or renamed theme. exceptFolder excludes the theme itself.
 static bool ThemeNameTaken(const std::wstring& name, const std::wstring& exceptFolder) {
     for (const std::wstring& dir : ThemeDirs()) {
         WIN32_FIND_DATAW fd = {};
@@ -449,40 +449,40 @@ static bool ThemeNameTaken(const std::wstring& name, const std::wstring& exceptF
 
 bool ImportTheme(const std::wstring& name, const std::wstring& dayImage,
                  const std::wstring& nightImage, std::wstring& outName, std::wstring* err) {
-    // 失败统一从这里走，让界面/命令行拿到"为什么失败"而不是一句笼统的提示
+    // Return specific failure reasons to both the UI and command-line callers.
     auto fail = [&](const std::wstring& why) {
         if (err) *err = why;
         return false;
     };
-    if (dayImage.empty() || nightImage.empty()) return fail(L"没有选够两张图片");
-    // 名字校验与"重命名主题"同一套规则：否则 "..\..\x" 会把文件写到主题目录之外
+    if (dayImage.empty() || nightImage.empty()) return fail(L"Select two images.");
+    // Use the rename validation rules so paths such as "..\..\x" cannot escape the theme root.
     std::wstring nameErr;
     if (!ThemeNameValid(name, nameErr)) return fail(nameErr);
     std::wstring root = UserThemeDir();
-    if (root.empty()) return fail(L"主题目录不可用");
+    if (root.empty()) return fail(L"The themes directory is unavailable.");
     EnsureDir(root);
 
-    // 重名时自动加后缀，避免覆盖已有主题（占用判断覆盖所有主题目录，见 ThemeNameTaken）
+    // Append a suffix on conflicts; ThemeNameTaken checks every theme directory.
     std::wstring finalName = name;
     for (int i = 2; ThemeNameTaken(finalName, L""); ++i) {
         wchar_t suffix[16];
         swprintf(suffix, 16, L" (%d)", i);
         finalName = name + suffix;
-        if (i > 99) return fail(L"同名主题太多了，换个名字");
+        if (i > 99) return fail(L"Too many themes share this name. Choose another name.");
     }
     std::wstring target = JoinPath(root, finalName);
     if (!CreateDirectoryW(target.c_str(), nullptr))
-        return fail(L"无法创建主题文件夹（程序目录\\themes 不可写，且 %APPDATA% 也失败）");
+        return fail(L"Cannot create a theme folder in the app directory or %APPDATA%.");
 
-    // 复制两张图（统一用 .jpg 后缀，内容仍按实际格式被解码）
+    // Copy both images with .jpg suffixes; decoding still recognizes the actual image format.
     auto copyAs = [&](const std::wstring& src, int index) -> bool {
         std::wstring dst = JoinPath(target, finalName + L"_" + std::to_wstring(index) + L".jpg");
         return CopyFileW(src.c_str(), dst.c_str(), FALSE) != FALSE;
     };
-    if (!copyAs(dayImage, 1)) return fail(L"复制浅色图片失败（原文件可能已被移动或删除）");
-    if (!copyAs(nightImage, 2)) return fail(L"复制深色图片失败（原文件可能已被移动或删除）");
+    if (!copyAs(dayImage, 1)) return fail(L"Cannot copy the light image. It may have been moved or deleted.");
+    if (!copyAs(nightImage, 2)) return fail(L"Cannot copy the dark image. It may have been moved or deleted.");
 
-    // 生成 theme.json（WDD 兼容格式，日间=1，夜间=2），UTF-8 编码写入
+    // Write UTF-8 theme.json in WDD format: day=1, night=2.
     std::wstring json = L"{\r\n"
                         L"  \"imageFilename\": \"" + finalName + L"_*.jpg\",\r\n"
                         L"  \"displayName\": \"" + finalName + L"\",\r\n"
@@ -492,46 +492,46 @@ bool ImportTheme(const std::wstring& name, const std::wstring& dayImage,
     std::wstring jsonPath = JoinPath(target, L"theme.json");
     HANDLE h = CreateFileW(jsonPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return fail(L"写入 theme.json 失败");
+    if (h == INVALID_HANDLE_VALUE) return fail(L"Cannot write theme.json.");
     int n = WideCharToMultiByte(CP_UTF8, 0, json.c_str(), (int)json.size(), nullptr, 0, nullptr, nullptr);
     std::string utf8(n, 0);
     WideCharToMultiByte(CP_UTF8, 0, json.c_str(), (int)json.size(), &utf8[0], n, nullptr, nullptr);
     DWORD written = 0;
     BOOL ok = WriteFile(h, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
     CloseHandle(h);
-    if (!ok) return fail(L"写入 theme.json 失败");
+    if (!ok) return fail(L"Cannot write theme.json.");
 
     outName = finalName;
     return true;
 }
 
 // ---------------------------------------------------------------------------
-//  主题重命名：改文件夹名（主题的身份），并同步 theme.json 的 displayName，
-//  否则重新扫描时显示的还是老名字。图片文件名不动（imageFilename 是通配模式）。
+// Rename the folder and update theme.json displayName so rescanning shows the new name.
+// Image filenames stay unchanged; imageFilename is a wildcard pattern.
 // ---------------------------------------------------------------------------
 bool ThemeNameValid(const std::wstring& name, std::wstring& err) {
-    if (name.empty()) { err = L"名字不能为空"; return false; }
-    if (name.size() > 60) { err = L"名字太长了（最多 60 个字符）"; return false; }
+    if (name.empty()) { err = L"Enter a name."; return false; }
+    if (name.size() > 60) { err = L"Use 60 characters or fewer."; return false; }
     for (wchar_t c : name) {
         if (c < 32 || wcschr(L"\\/:*?\"<>|", c)) {
-            err = L"名字里不能有 \\ / : * ? \" < > | 这些字符";
+            err = L"Names cannot contain \\ / : * ? \" < > | characters.";
             return false;
         }
     }
-    if (name == L"." || name == L"..") { err = L"这个名字不能用"; return false; }
+    if (name == L"." || name == L"..") { err = L"This name is not allowed."; return false; }
     return true;
 }
 
 bool ThemeNameAvailable(const std::wstring& name, const std::wstring& exceptFolder, std::wstring& err) {
     if (!ThemeNameValid(name, err)) return false;
     if (ThemeNameTaken(name, exceptFolder)) {
-        err = L"已经有同名的主题了，换个名字";
+        err = L"A theme with this name already exists. Choose another name.";
         return false;
     }
     return true;
 }
 
-// 改 theme.json 里的 displayName（找不到就插一条；文件不存在就跳过）
+// Update displayName, inserting it if absent; skip nonexistent theme.json files.
 static void UpdateThemeJsonDisplayName(const std::wstring& folder, const std::wstring& newName) {
     std::wstring path = JoinPath(folder, L"theme.json");
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
@@ -542,13 +542,13 @@ static void UpdateThemeJsonDisplayName(const std::wstring& folder, const std::ws
     if (size) ReadFile(h, &bytes[0], size, &read, nullptr);
     CloseHandle(h);
 
-    // UTF-8 → UTF-16（去掉 BOM）
+    // Decode UTF-8 to UTF-16 and remove any BOM.
     if (read >= 3 && (unsigned char)bytes[0] == 0xEF) bytes.erase(0, 3);
     int wn = MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), (int)bytes.size(), nullptr, 0);
     std::wstring w((size_t)(wn > 0 ? wn : 0), 0);
     if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, bytes.c_str(), (int)bytes.size(), &w[0], wn);
 
-    // 找 "displayName" : "..." 替换引号里的内容；没有就插在第一行 { 之后
+    // Replace the quoted displayName value, or insert it after the opening brace.
     const std::wstring key = L"\"displayName\"";
     size_t k = w.find(key);
     if (k != std::wstring::npos) {
@@ -563,7 +563,7 @@ static void UpdateThemeJsonDisplayName(const std::wstring& folder, const std::ws
         w.insert(brace + 1, L"\r\n  \"displayName\": \"" + newName + L"\",");
     }
 
-    // 写回 UTF-8（无 BOM）
+    // Write UTF-8 without a BOM.
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
     std::string out((size_t)(n > 0 ? n : 0), 0);
     if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &out[0], n, nullptr, nullptr);
@@ -576,40 +576,40 @@ static void UpdateThemeJsonDisplayName(const std::wstring& folder, const std::ws
 }
 
 bool RenameTheme(const std::wstring& folder, const std::wstring& newName, std::wstring& err) {
-    if (folder.empty()) { err = L"主题目录不存在"; return false; }
+    if (folder.empty()) { err = L"The theme directory does not exist."; return false; }
     if (!ThemeNameAvailable(newName, folder, err)) return false;
     size_t sl = folder.find_last_of(L"\\/");
-    if (sl == std::wstring::npos) { err = L"主题目录路径异常"; return false; }
+    if (sl == std::wstring::npos) { err = L"The theme directory path is invalid."; return false; }
     std::wstring parent = folder.substr(0, sl);
     std::wstring target = JoinPath(parent, newName);
-    if (target == folder) return true;                       // 没变
+    if (target == folder) return true;                       // Unchanged.
     if (!MoveFileExW(folder.c_str(), target.c_str(), 0)) {
-        err = L"改名失败：目标文件夹已存在，或被占用（关掉资源管理器里的主题文件夹再试）";
+        err = L"Cannot rename the folder. It already exists or is in use. Close it in File Explorer and retry.";
         return false;
     }
     UpdateThemeJsonDisplayName(target, newName);
     return true;
 }
 
-// 安全：拒绝删除盘符根目录这类危险路径（例如 "C:\"）
+// Reject dangerous deletion targets such as drive roots (for example, C:\).
 static bool SafeToDelete(const std::wstring& folder) {
     if (folder.empty() || folder.size() <= 3) return false;
-    // 路径必须以 <盘符>:\ 开头，且不是盘符本身
+    // Require an absolute drive path with a component after the root.
     if (folder.size() >= 3 && folder[1] == L':' && (folder[2] == L'\\' || folder[2] == L'/'))
         return folder.size() > 3;
     return false;
 }
 
-// 删除主题：移到回收站（可恢复）。用 IFileOperation 而不是 SHFileOperation——
-// MinGW 在较新的 NTDDI_VERSION 下会隐藏老 API，两者配合 FOF_ALLOWUNDO 等价。
+// Move deleted themes to the Recycle Bin with IFileOperation.
+// MinGW may hide SHFileOperation with newer NTDDI_VERSION; FOF_ALLOWUNDO gives equivalent behavior.
 bool DeleteThemeFolder(const std::wstring& folder, std::wstring& outErr) {
     outErr.clear();
     if (folder.empty() || !DirExists(folder)) {
-        outErr = L"主题文件夹不存在：可能已经被删掉了";
+        outErr = L"The theme folder no longer exists.";
         return false;
     }
     if (!SafeToDelete(folder)) {
-        outErr = L"路径不安全，已拒绝删除";
+        outErr = L"Deletion refused: unsafe path.";
         return false;
     }
 
@@ -625,24 +625,24 @@ bool DeleteThemeFolder(const std::wstring& folder, std::wstring& outErr) {
         }
         pfo->Release();
     }
-    // 失败时不退化成直接删除：PerformOperations 失败多半是文件被占用，硬删会把
-    // 没被占用的文件永久删掉、整个文件夹却删不掉（回收站也找不回）。真没有回收
-    // 站的盘 IFileOperation 自己会永久删除，这里只需报错让用户重试。
+    // Do not fall back to direct deletion on failure: a folder in use could be partially erased
+    // without a recoverable Recycle Bin entry. Report the error so the user can retry.
+    // IFileOperation itself handles drives without a Recycle Bin.
     if (!ok || DirExists(folder)) {
-        outErr = L"删除失败：文件可能正被占用，或没有权限";
+        outErr = L"Cannot delete the theme. Files may be in use or access may be denied.";
         return false;
     }
     return true;
 }
 
 // ---------------------------------------------------------------------------
-//  时间 / 阶段
+// Time and day/night stages.
 // ---------------------------------------------------------------------------
 int StageAt(const Config& c, int m) {
     int d = c.dayStart, n = c.nightStart;
     if (d == n) return 0;
-    if (d < n) return (m >= d && m < n) ? 0 : 1;   // 日间时段不跨午夜
-    return (m >= d || m < n) ? 0 : 1;              // 日间时段跨午夜（如 22:00–06:00）
+    if (d < n) return (m >= d && m < n) ? 0 : 1;   // Daytime does not cross midnight.
+    return (m >= d || m < n) ? 0 : 1;              // Daytime crosses midnight, for example 22:00-06:00.
 }
 
 int NextSwitchAt(const Config& c, int m) {
@@ -671,17 +671,17 @@ std::wstring FormatHM(int minutes) {
 }
 
 std::wstring FormatDuration(int minutes) {
-    if (minutes <= 0) return L"即将";
+    if (minutes <= 0) return L"soon";
     int h = minutes / 60, m = minutes % 60;
     wchar_t buf[64];
-    if (h > 0 && m > 0) swprintf(buf, 64, L"%d 小时 %d 分", h, m);
-    else if (h > 0)     swprintf(buf, 64, L"%d 小时", h);
-    else                swprintf(buf, 64, L"%d 分钟", m);
+    if (h > 0 && m > 0) swprintf(buf, 64, L"%d hr %d min", h, m);
+    else if (h > 0)     swprintf(buf, 64, L"%d hr", h);
+    else                swprintf(buf, 64, L"%d min", m);
     return buf;
 }
 
-// 当前系统壁纸的路径（注册表里那份）；读不到或文件不存在时返回空串。
-// 先量大小再读：路径可能超过 MAX_PATH，固定缓冲会把长路径截断成不存在的文件
+// Read the current wallpaper path from the registry; return empty if unavailable or missing.
+// Query the size first because wallpaper paths may exceed MAX_PATH.
 std::wstring CurrentWallpaperPath() {
     HKEY k = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", 0, KEY_READ, &k) != ERROR_SUCCESS)
@@ -694,13 +694,13 @@ std::wstring CurrentWallpaperPath() {
         st = RegQueryValueExW(k, L"WallPaper", nullptr, nullptr, (LPBYTE)&path[0], &n);
     }
     RegCloseKey(k);
-    while (!path.empty() && path.back() == L'\0') path.pop_back();   // 值自带结尾的 '\0'
+    while (!path.empty() && path.back() == L'\0') path.pop_back();   // The value includes its terminating null.
     if (st != ERROR_SUCCESS || path.empty() || !FileExists(path)) return std::wstring();
     return path;
 }
 
 // ---------------------------------------------------------------------------
-//  壁纸（填充方式值与 IDesktopWallpaper::SetPosition 的枚举一致）
+// Wallpaper position values match IDesktopWallpaper::SetPosition.
 // ---------------------------------------------------------------------------
 bool ReadWallpaperSnapshot(std::vector<std::pair<std::wstring, std::wstring>>& snapshot) {
     IDesktopWallpaper* dw = nullptr;
@@ -727,7 +727,7 @@ bool ReadWallpaperSnapshot(std::vector<std::pair<std::wstring, std::wstring>>& s
 bool ApplyWallpaper(const std::wstring& image, int style) {
     if (image.empty() || !FileExists(image)) return false;
 
-    // 通知资源管理器允许壁纸淡入过渡（WinDynamicDesktop 同款做法）
+    // Notify Explorer to enable wallpaper cross-fades, following WinDynamicDesktop.
     if (HWND progman = FindWindowW(L"Progman", nullptr)) {
         DWORD_PTR res = 0;
         SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_ABORTIFHUNG, 1000, &res);
@@ -742,7 +742,7 @@ bool ApplyWallpaper(const std::wstring& image, int style) {
         dw->Release();
     }
     if (!ok) {
-        // 回退：老 API（同时写入注册表并广播设置变更）
+        // Legacy API fallback also updates the registry and broadcasts the change.
         ok = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, (void*)image.c_str(),
                                    SPIF_UPDATEINIFILE | SPIF_SENDCHANGE) != FALSE;
     }
@@ -750,7 +750,7 @@ bool ApplyWallpaper(const std::wstring& image, int style) {
 }
 
 // ---------------------------------------------------------------------------
-//  开机自启
+// Start with Windows.
 // ---------------------------------------------------------------------------
 bool AutoStartEnabled() {
     wchar_t buf[MAX_PATH * 2] = {0};
@@ -764,7 +764,7 @@ bool AutoStartHasBackgroundFlag() {
     wchar_t buf[MAX_PATH * 2] = {0};
     DWORD sz = sizeof(buf);
     if (RegGetValueW(HKEY_CURRENT_USER, kRunKey, kAppName, RRF_RT_REG_SZ, nullptr, buf, &sz) != ERROR_SUCCESS)
-        return true;                               // 没读到就算了，别反复重写
+        return true;                               // If reading failed, avoid repeatedly rewriting the value.
     std::wstring s = buf;
     return s.find(L"--autostart") != std::wstring::npos ||
            s.find(L"--background") != std::wstring::npos ||
@@ -777,19 +777,19 @@ void SetAutoStart(bool on) {
                         &key, nullptr) != ERROR_SUCCESS)
         return;
     if (on) {
-        // 带上 --autostart：程序启动就知道"这次是开机自启"，只在托盘静默运行
+        // Include --autostart so startup launches silently into the system tray.
         std::wstring cmd = L"\"" + ExePath() + L"\" --autostart";
         RegSetValueExW(key, kAppName, 0, REG_SZ, (const BYTE*)cmd.c_str(),
                        (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
     } else {
         RegDeleteValueW(key, kAppName);
     }
-    RegDeleteValueW(key, kLegacyName);          // 更名前的项一并清掉，注册表里只留一条
+    RegDeleteValueW(key, kLegacyName);          // Remove the legacy entry so only one startup command remains.
     RegCloseKey(key);
 }
 
 // ---------------------------------------------------------------------------
-//  单实例
+// Single-instance handling.
 // ---------------------------------------------------------------------------
 static HANDLE g_mutex = nullptr;
 
@@ -800,8 +800,8 @@ bool SingleInstanceAcquire() {
     return true;
 }
 
-// 主窗口类名固定，找到后发一条自定义消息（默认让它显示自己）。
-// 更名前的老进程用旧类名，也查一下：过渡期两个版本可能短暂并存。
+// Find the main window by its fixed class name and send a custom message (show by default).
+// Also check the legacy class name during upgrades when an older process may still be running.
 void NotifyExistingInstance(int msg) {
     if (HWND h = FindWindowW(L"DynamicWallpapersMainWindow", nullptr))
         PostMessageW(h, msg, 0, 0);

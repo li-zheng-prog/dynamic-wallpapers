@@ -1,14 +1,14 @@
-"""从 logo.png 生成应用图标 app.ico（exe / 托盘 / 窗口 / 安装程序共用这一份）。
+"""Generate app.ico from logo.png for the executable, tray, windows, and installer.
 
-裁切形状 = 三星 One UI 应用图标的官方方圆形（squircle）：连续曲率、整条边都是曲线、
-无直线段，坐标取自 One UI Design Guidelines「App icons in One UI」图标底板的矢量路径
-（归一化 0..1，One UI 7.0 默认形状与之一致），不做任何缩放改动。
-小尺寸（≤32px）缩放后加一道轻锐化：箭头和时钟会糊，托盘在 200% 缩放下系统取 32px，
-小档画质直接决定托盘观感。
-换图标：替换项目根目录的 logo.png（正方形、建议 512 以上），重新跑 build/build.sh 即可。
-logo 周边别留太多空白：图标要顶到边，四周大块留白会显得图标很小。
+The crop uses the Samsung One UI squircle with continuous curved edges.
+Coordinates come from the icon background vector in the One UI Design Guidelines,
+normalized to 0..1 without reshaping, matching the default One UI 7.0 shape.
+Sharpen sizes up to 32px to preserve arrow and clock detail after downsampling.
+Windows uses the 32px tray icon at 200% scaling, so small sizes matter.
+Replace the root logo.png (square, preferably 512px or larger) and rerun build/build.sh.
+Avoid large blank margins, which make the icon look too small.
 
-用法: python make_icon.py <输出路径.ico> [logo.png 路径]
+Usage: python make_icon.py <output.ico> [path/to/logo.png]
 """
 import io
 import os
@@ -19,8 +19,8 @@ from PIL import Image, ImageDraw, ImageFilter
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 
-# One UI 方圆形路径，归一化 0..1 坐标（起点不另记，每段 = x1,y1 c1x,c1y c2x,c2y x2,y2）。
-# 段间有零长度控制柄属于官方路径原样，三次贝塞尔求值不受影响。
+# Normalized One UI squircle segments: x1,y1 c1x,c1y c2x,c2y x2,y2.
+# Zero-length control handles are retained from the original cubic Bezier path.
 _SQUIRCLE_SEGS = (
     (0.988307, 0.351697, 0.976083, 0.259311, 0.943369, 0.175610, 0.885730, 0.114288),
     (0.885730, 0.114288, 0.824390, 0.056631, 0.740690, 0.023935, 0.648284, 0.011693),
@@ -40,14 +40,14 @@ _SQUIRCLE_SEGS = (
     (0.997122, 0.500000, 0.997122, 0.500000, 1.000000, 0.439905, 0.988307, 0.351697),
 )
 
-_SQUIRCLE_BASE_PX = 1024      # 大蒙版一次画好，各档尺寸从它缩下去（小档等效高倍超采样）
+_SQUIRCLE_BASE_PX = 1024      # Render once at high resolution, then downsample.
 _squircleBase = None
 _maskCache = {}
 
 
 def squircle_mask(size: int) -> Image.Image:
-    """One UI 方圆形蒙版（L 模，形状内为 255）。PIL 的多边形没有自带抗锯齿，
-    先在 1024px 上把矢量路径展成多边形画好，再 LANCZOS 缩到目标尺寸，圆角边缘才平滑。"""
+    """Create an L-mode squircle mask with 255 inside the shape.
+    Rasterize at 1024px and downsample with LANCZOS for antialiased edges."""
     global _squircleBase
     if size not in _maskCache:
         if _squircleBase is None:
@@ -71,7 +71,7 @@ def squircle_mask(size: int) -> Image.Image:
 
 def make(size: int, src: Image.Image) -> Image.Image:
     img = src.resize((size, size), Image.LANCZOS)
-    if size <= 32:                        # 小尺寸：轻锐化，减轻缩放糊
+    if size <= 32:                        # Light sharpening offsets downsampling blur.
         img = img.filter(ImageFilter.UnsharpMask(radius=1.2, percent=90, threshold=2))
     out = img.convert("RGBA")
     out.putalpha(squircle_mask(size))
@@ -79,7 +79,7 @@ def make(size: int, src: Image.Image) -> Image.Image:
 
 
 def write_ico(entries, path):
-    """手写 ICO（每档用 PNG 存）"""
+    """Write an ICO container with PNG data for each size."""
     pngs = []
     for size, img in entries:
         buf = io.BytesIO()
@@ -103,17 +103,17 @@ def main():
     logo = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, "..", "logo.png")
     logo = os.path.normpath(logo)
     if not os.path.exists(logo):
-        print("!! 找不到 logo.png:", logo)
+        print("!! Cannot find logo.png:", logo)
         sys.exit(1)
     src = Image.open(logo).convert("RGBA")
-    if src.width != src.height:                       # 非正方形：居中裁成正方形
+    if src.width != src.height:                       # Center-crop nonsquare input.
         side = min(src.width, src.height)
         src = src.crop(((src.width - side) // 2, (src.height - side) // 2,
                         (src.width - side) // 2 + side, (src.height - side) // 2 + side))
     entries = [(s, make(s, src)) for s in SIZES]
     write_ico(entries, out)
-    # 顺便写一份方圆形 PNG 到同目录（app.rc / setup.rc 把它作为 IDR_LOGO_PNG 打进 exe，
-    # 主界面和安装界面标题栏左上角的小标记就是它）
+    # Embed this PNG as IDR_LOGO_PNG through app.rc and setup.rc.
+    # The main app and installer share it as their title-bar logo.
     ui_png = os.path.join(os.path.dirname(os.path.abspath(out)), "logo_ui.png")
     make(128, src).save(ui_png)
     print(f"icon written: {out} sizes: {list(SIZES)} (from {logo}, {src.width}px)")

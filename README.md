@@ -1,66 +1,77 @@
 # Dynamic Wallpapers
 
-按时间或系统深浅色，自动在主题的浅色、深色两张壁纸之间切换的 Windows 桌面工具。
-纯自绘的 WinUI3 风格界面。
+A Windows desktop app that switches between a theme's light and dark wallpapers on a
+schedule or with the Windows app theme. Built with a custom WinUI 3 style interface.
 
-## 功能
+## Features
 
-- **主题管理**：主题卡片网格（自动换行 + 滚动），添加主题只需浅色/深色两张图，
-  支持重命名、删除（移到回收站，可恢复）；兼容 WinDynamicDesktop 的
-  `theme.json` 格式
-- **切换方式**：按时段（日间开始/夜间开始两个时间点），或跟随系统深浅色
-  （Windows 自定义模式下跟随应用模式，变更即时生效）
-- **外观**：跟随系统 / 浅色 / 深色，强调色取自系统
-- **壁纸填充**：居中/平铺/拉伸/适应/填充/跨屏，多显示器可用
-- **窗口底色**：Win11 用系统亚克力实时模糊（SystemBackdrop）；Win10 用跟随深浅色的
-  纯色底；`--self-glass` 可强制自绘磨砂（壁纸缩小再放大 + 色调纱 + 颗粒）
-- **托盘常驻**：关闭窗口收进托盘继续切换；托盘菜单可暂停/改设置/退出
-- **原生最小化**：最小化及任务栏还原使用 Windows 系统动画，遵循系统动画设置
-- **开机自启**：静默进托盘，不弹界面
-- **单实例**：重复启动会把参数转交给已运行的实例
-- **尊重手动壁纸**：当前主题的浅色/深色图之间切换始终保留主题；主题外壁纸稳定约 1 秒、
-  经复查确认后退出主题，等待期间停止自动写入。重启后保持无主题，直到重新选择主题。
-  系统切换的延迟通知、多屏分批更新不会直接清空主题；设置失败或超时最多尝试 3 次，
-  可通过托盘“立即应用”或重新选择主题重试
-- **中文输入**：主题名输入框完整支持输入法
+- **Theme management**: a scrolling, responsive card grid. Create a theme from two
+  images, rename it, or move it to the Recycle Bin. Supports the WinDynamicDesktop
+  `theme.json` format.
+- **Switching modes**: set day and night start times, or follow the Windows app theme.
+  Changes take effect immediately, including when Windows uses Custom color mode.
+- **Appearance**: system, light, or dark, with the Windows accent color.
+- **Wallpaper positioning**: center, tile, stretch, fit, fill, or span across monitors.
+- **Window background**: live system acrylic on Windows 11 and a theme-aware solid
+  background on Windows 10. `--self-glass` enables a custom wallpaper-based blur
+  with a tint and subtle noise.
+- **System tray**: closing the window keeps wallpaper switching active. The tray
+  menu provides settings, pause, Apply now, and Quit actions.
+- **Native minimize and restore**: uses Windows animations and respects system
+  animation settings.
+- **Start with Windows**: launches silently in the system tray.
+- **Single instance**: forwards supported commands to the running instance.
+- **Manual wallpaper changes**: switching between the selected theme's own images
+  keeps that theme active. An external wallpaper must remain stable for about one
+  second and pass a follow-up check before the theme is deselected. Automatic
+  writes pause during that check. No-theme state persists across restarts until
+  another theme is selected. Delayed notifications and staggered monitor updates
+  do not immediately clear the theme. Failed or timed-out changes are attempted
+  at most three times; use Apply now or select the theme again to retry.
+- **Unicode input**: theme name fields support input method editors (IMEs).
 
-命令行参数、卸载流程等细节见 `src/`、`setup/` 源码。
+See `src/` and `setup/` for implementation and uninstall details.
 
-## 下载安装
+## Download and install
 
-到 [Releases](../../releases) 页面下载：
+Download the files from [Releases](../../releases):
 
-| 文件 | 平台 | 说明 |
+| File | Platform | Description |
 |---|---|---|
-| `DynamicWallpapersSetup.exe` | Windows 10+ | 安装版（含示例主题，写入卸载项） |
-| `DynamicWallpapers-portable.exe` | Windows 10+ | 便携版（旁边放 `themes/` 文件夹即可用） |
+| `DynamicWallpapersSetup.exe` | Windows 10+ | Installer with an example theme and an uninstall entry |
+| `DynamicWallpapers-portable.exe` | Windows 10+ | Portable app; place a `themes/` folder beside it |
+| `themes.zip` | Windows 10+ | Example theme for the portable app; extract beside the executable |
 
-## 从源码构建
+## Build from source
 
-### Windows（MinGW-w64）
+### Windows (MinGW-w64)
 
-依赖：[MinGW-w64](https://winlibs.com/)（g++，放在 `D:\mingw64` 或改
-`build/build.sh` 里的路径）、Python 3 + Pillow（生成图标）。
+Requirements: [MinGW-w64](https://winlibs.com/) (`g++`, installed at `D:\mingw64`,
+or update the paths in `build/build.sh`), Git Bash, and Python 3 with Pillow.
 
 ```bash
 bash build/build.sh
-# 产物：dist/DynamicWallpapers-portable.exe、dist/DynamicWallpapersSetup.exe
+# Outputs: dist/DynamicWallpapers-portable.exe and dist/DynamicWallpapersSetup.exe
 ```
 
-启动优化回归测试（Windows 桌面环境，使用真实 D3D/WIC）：
+Run the regression suite in a Windows desktop session with real D3D/WIC support:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build/test.ps1
 ```
 
-测试会在临时目录构建独立程序，验证壁纸去重、延迟生效、多屏分批更新、快速反向切换、
-外部变更确认与有限重试、图形延迟初始化、DPI 缓冲复用、原生最小化/还原与窗口位置保持、
-异步缩略图取消及退出；测试中的壁纸应用、配置保存和自启写入均已替换。
+The suite builds a separate test executable in a temporary directory. It covers
+wallpaper deduplication, delayed and staggered monitor updates, rapid reversals,
+external-change confirmation, bounded retries, deferred graphics initialization,
+DPI buffer reuse, native minimize/restore and window placement, asynchronous
+thumbnail cancellation, and shutdown. Wallpaper writes, configuration saves, and
+startup registry writes are stubbed during testing.
 
-## 主题格式
+## Theme format
 
-一个主题 = `themes/` 下的一个文件夹，内含若干图片 + 可选的 `theme.json`
-（WinDynamicDesktop 兼容，本程序只取日间、夜间两张）：
+Each theme is a folder under `themes/` containing images and an optional
+WinDynamicDesktop-compatible `theme.json`. This app uses one day image and one
+night image:
 
 ```json
 {
@@ -71,41 +82,43 @@ powershell -ExecutionPolicy Bypass -File build/test.ps1
 }
 ```
 
-没有 `theme.json` 时：文件名排第一张当浅色图、最后一张当深色图。
-界面里点「添加主题」也可以直接挑两张图生成主题。
+Without `theme.json`, the first naturally sorted image is used for light mode and
+the last for dark mode. Use **Add theme** to create a theme from two selected images.
 
-## 目录结构
+## Repository layout
 
-```
-├── src/        Windows 主程序（D2D 自绘 UI）
-├── setup/      Windows 安装程序（payload 以 RCDATA 内嵌）
-├── build/      构建脚本（编译 / 图标 / 打包 payload）
-└── themes/     随安装包分发的示例主题
-```
-
-## 命令行
-
-```
---show                 显示主界面
---apply                立即应用当前壁纸后退出
---set-theme=<名字>     切换到指定主题（已运行时转发给主实例）
---add-theme=<文件夹>   把文件夹里的图片导入为主题（导入后打开主界面）
---delete-theme=<名字>  把主题移到回收站后退出
---autostart            开机自启专用：只在托盘静默运行
---simulate-hour=<n>    模拟时刻（测试用）
---opaque               关闭毛玻璃（排错用）
---self-glass           强制自绘磨砂，不用系统材质（排错用）
---solid                强制纯色底，不模糊（排错用）
+```text
+src/        Windows application with a custom Direct2D interface
+setup/      Installer with its payload embedded as RCDATA resources
+build/      Build, icon generation, payload packaging, and test scripts
+tests/      Startup, rendering, and wallpaper regression tests
+themes/     Example themes distributed with the installer
 ```
 
-## 许可证
+## Command-line options
 
-代码以 [MIT](LICENSE) 许可证发布。
+```text
+--show                 Show the main window
+--apply                Apply the current wallpaper once and exit
+--set-theme=<name>     Select a theme; forward to the running instance if present
+--add-theme=<folder>   Import images from a folder and open the main window
+--delete-theme=<name>  Move a theme to the Recycle Bin and exit
+--autostart            Start silently in the system tray
+--simulate-hour=<n>    Override the current hour for testing
+--opaque               Use an opaque background for diagnostics
+--self-glass           Use custom frosted glass instead of system acrylic
+--solid                Use a solid background without blur
+```
 
-注意：`themes/Big Sur Graphic/` 内的壁纸图片版权归 Apple 所有，仅作为示例
-主题供个人使用与演示；分发安装包时请自行留意相关版权。
+## License
 
-## 致谢
+The code is released under the [MIT License](LICENSE).
 
-- [WinDynamicDesktop](https://github.com/t1m0thyj/WinDynamicDesktop) —
-  主题格式与壁纸切换思路的参考
+The wallpaper images in `themes/Big Sur Graphic/` are copyrighted by Apple and
+are included as examples for personal use and demonstration. Consider the
+applicable image rights before redistributing an installer containing them.
+
+## Acknowledgments
+
+- [WinDynamicDesktop](https://github.com/t1m0thyj/WinDynamicDesktop) for the theme
+  format and the approach to wallpaper switching.

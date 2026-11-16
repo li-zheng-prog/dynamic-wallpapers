@@ -25,7 +25,7 @@ static void DecodeThumb(IWICImagingFactory* wic, ThumbResult& result) {
         release();
         return;
     }
-    // 同时约束高和宽，避免异常长图产生过大的解码缓冲。
+    // Constrain both dimensions to avoid oversized decode buffers for extreme aspect ratios.
     double scale = (std::min)(1.0, (std::min)(420.0 / width, 4096.0 / height));
     result.width = (std::max)(1u, (UINT)(width * scale));
     result.height = (std::max)(1u, (UINT)(height * scale));
@@ -117,7 +117,7 @@ void ThumbLoader::run() {
             active_ = ThumbRequest{};
             if (!stopping_ && result.request.generation == generation_) {
                 results_.push_back(std::move(result));
-                // 消息只负责唤醒，像素仍由队列持有；销毁窗口不会遗留裸指针。
+                // The message only wakes the UI; pixels stay in the queue, avoiding dangling pointers on shutdown.
                 PostMessageW(hwnd_, message_, 0, 0);
             }
         }
