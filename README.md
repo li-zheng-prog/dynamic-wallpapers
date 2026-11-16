@@ -30,13 +30,14 @@ custom interface inspired by WinUI 3.
 
 ## Download and install
 
-Choose a package from [Releases](../../releases):
+Download the installer from [Releases](../../releases). The portable executable
+and example theme archive are available directly from this repository:
 
 | File | Use |
 | --- | --- |
-| `DynamicWallpapersSetup.exe` | Install the app with an example theme and a Windows uninstall entry. |
-| `DynamicWallpapers-portable.exe` | Run the app without installation. |
-| `themes.zip` | Add the example theme to the portable app. |
+| [DynamicWallpapersSetup.exe](https://github.com/li-zheng-prog/dynamic-wallpapers/releases/latest/download/DynamicWallpapersSetup.exe) | Install the app with an example theme and a Windows uninstall entry. |
+| [DynamicWallpapers-portable.exe](dist/DynamicWallpapers-portable.exe?raw=true) | Run the app without installation. |
+| [themes.zip](dist/themes.zip?raw=true) | Add the example theme to the portable app. |
 
 ### Installer
 
@@ -209,8 +210,9 @@ dist/
 └── themes/
 ```
 
-The installer embeds the application and repository themes. Build outputs are
-excluded from Git.
+The installer embeds the application and repository themes. The installer,
+portable executable, and `themes.zip` are tracked in Git under `dist/`.
+Additional generated files, including the `dist/themes/` directory, are ignored.
 
 ### Run regression tests
 
@@ -245,6 +247,7 @@ during testing.
 | [`src/`](src/) | Windows application and custom Direct2D interface. |
 | [`setup/`](setup/) | Installer with its payload embedded as RCDATA resources. |
 | [`build/`](build/) | Build, icon generation, payload packaging, and test scripts. |
+| [`dist/`](dist/) | Installer, portable executable, and example theme archive. |
 | [`tests/`](tests/) | Startup, rendering, and wallpaper regression tests. |
 | [`themes/`](themes/) | Example themes distributed with the installer. |
 

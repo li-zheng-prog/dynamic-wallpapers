@@ -1,4 +1,5 @@
-# Build outputs go to GitHub Releases, not Git.
+# Existing distribution packages in dist/ are tracked in Git.
+# Ignore additional generated files in this directory.
 dist/
 
 # Intermediate build files.
