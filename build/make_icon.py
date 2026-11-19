@@ -1,7 +1,6 @@
 """Generate app.ico from logo.png for the executable, tray, windows, and installer.
 
-Use a square logo with a transparent background and no outer padding.
-The source alpha defines the silhouette at every size; no mask is applied.
+Use an opaque square master. Apply continuous corners when exporting it for Windows.
 
 Usage: python make_icon.py <output.ico> [path/to/logo.png]
 """
@@ -10,9 +9,21 @@ import os
 import struct
 import sys
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+
+
+def windows_mask(side: int) -> Image.Image:
+    # Supersample a fifth-order superellipse to approximate continuous corners.
+    n = 4 * side
+    mask = Image.new("L", (n, n))
+    draw = ImageDraw.Draw(mask)
+    for y in range(n):
+        dy = abs((2 * y + 1) / n - 1)
+        inset = round((1 - (1 - dy**5)**0.2) * n / 2)
+        draw.line((inset, y, n - 1 - inset, y), fill=255)
+    return mask.resize((side, side), Image.Resampling.BOX)
 
 
 def make(size: int, src: Image.Image) -> Image.Image:
@@ -55,6 +66,7 @@ def main():
         side = min(src.width, src.height)
         src = src.crop(((src.width - side) // 2, (src.height - side) // 2,
                         (src.width - side) // 2 + side, (src.height - side) // 2 + side))
+    src.putalpha(windows_mask(src.width))
     entries = [(s, make(s, src)) for s in SIZES]
     write_ico(entries, out)
     # Embed this PNG as IDR_LOGO_PNG through app.rc and setup.rc.

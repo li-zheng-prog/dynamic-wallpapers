@@ -213,8 +213,9 @@ dist/
 ```
 
 The app, installer, and Windows shortcuts share artwork generated from
-`logo.png`. Its alpha channel defines the One UI-style outline; the build
-preserves that silhouette at each icon size. When replacing the artwork, bump
+`logo.png`, an opaque 1024 x 1024 master centered on the original black-and-white
+mark. The Windows exports add a continuous rounded-square mask, including the
+16 px tray icon and both title-bar images. When replacing the artwork, bump
 the installed icon filename in `src/shell_identity.h` and `build/build.sh` so
 Windows loads the new version instead of reusing a cached icon.
 

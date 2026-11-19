@@ -4,3 +4,4 @@
 #define IDR_LOGO_PNG  102   // Title-bar logo generated as logo_ui.png by build/make_icon.py.
 #define IDR_DIALOG_MANIFEST 103   // Private activation context for installer task dialogs.
 #define IDS_SHELL_TITLE 104
+#define IDI_TASKBAR_V5  105   // Version the shell lookup key; keep 101 valid for existing shortcuts.

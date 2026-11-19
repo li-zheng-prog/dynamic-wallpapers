@@ -60,7 +60,7 @@ cp -r "$ROOT/themes/." "$BUILD/payload/themes/"
 
 echo "==> Generating payload resources"
 python "$ROOTW/build/pack_setup.py" "$BUILD/payload" "$BUILD/setup" \
-    "$BUILD/src/app.ico" DynamicWallpapers-logo-v4.ico
+    "$BUILD/src/app.ico" DynamicWallpapers-logo-v5.ico
 
 echo "==> Compiling installer"
 cd "$BUILD/setup"

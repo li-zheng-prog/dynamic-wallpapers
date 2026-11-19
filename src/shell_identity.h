@@ -10,7 +10,7 @@
 // Keep the IDs stable across upgrades; change only the icon file name when the artwork changes.
 inline constexpr wchar_t kShellAppId[] = L"DynamicWallpapers.Windows";
 inline constexpr wchar_t kShellSetupId[] = L"DynamicWallpapers.Windows.Setup";
-inline constexpr wchar_t kShellIconFile[] = L"DynamicWallpapers-logo-v4.ico";
+inline constexpr wchar_t kShellIconFile[] = L"DynamicWallpapers-logo-v5.ico";
 
 inline HRESULT SetShellString(IPropertyStore* store, REFPROPERTYKEY key, const std::wstring& text) {
     PROPVARIANT value = {};

@@ -552,7 +552,7 @@ static void RunInstall() {
             SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, changed.c_str(), nullptr);
             if (it.rel == kShellIconFile) {
                 // Already pinned shortcuts may still refer to the previous icon file.
-                for (const wchar_t* oldIcon : {L"DynamicWallpapers-logo-v2.ico", L"DynamicWallpapers-logo-v3.ico"}) {
+                for (const wchar_t* oldIcon : {L"DynamicWallpapers-logo-v2.ico", L"DynamicWallpapers-logo-v3.ico", L"DynamicWallpapers-logo-v4.ico"}) {
                     const auto previous = JoinPath(g_s.installDir, oldIcon);
                     const DWORD attrs = GetFileAttributesW(previous.c_str());
                     if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
@@ -1059,11 +1059,14 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    const UINT dpi = GetDpiForSystem();
+    wc.hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                 GetSystemMetricsForDpi(SM_CXICON, dpi), GetSystemMetricsForDpi(SM_CYICON, dpi), LR_DEFAULTCOLOR);
+    wc.hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                   GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR);
     wc.lpszClassName = kWindowClass;
     RegisterClassExW(&wc);
 
-    UINT dpi = GetDpiForSystem();
     int w = (int)(WindowWidth() * dpi / 96.0f + 0.5f);
     int h = (int)(WindowHeight() * dpi / 96.0f + 0.5f);
     int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
@@ -1073,10 +1076,12 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                                 sx, sy, w, h, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
     g_s.hwnd = hwnd;
+    if (wc.hIcon) SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)wc.hIcon);
+    if (wc.hIconSm) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)wc.hIconSm);
     wchar_t exe[MAX_PATH * 2] = {};
     const DWORD exeLen = GetModuleFileNameW(nullptr, exe, (DWORD)_countof(exe));
     if (exeLen && exeLen < _countof(exe)) {
-        SetShellWindowRelaunch(hwnd, exe, std::wstring(exe) + L",-" + std::to_wstring(IDI_APPICON),
+        SetShellWindowRelaunch(hwnd, exe, std::wstring(exe) + L",-" + std::to_wstring(IDI_TASKBAR_V5),
                                L"", IDS_SHELL_TITLE, kShellSetupId);
     }
 

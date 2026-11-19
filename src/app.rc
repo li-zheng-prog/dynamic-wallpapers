@@ -1,5 +1,5 @@
 // Application resources: icon, title-bar logo, and version metadata.
-// To replace the icon, update the transparent square logo.png and run build/build.sh.
+// To replace the icon, update the opaque square logo.png and run build/build.sh.
 // build/make_icon.py generates app.ico for the executable, tray, windows, and installer,
 // plus logo_ui.png for the title-bar logo embedded below as RCDATA.
 #include "resource.h"
@@ -12,6 +12,7 @@ IDR_DIALOG_MANIFEST 24  "common-controls.manifest"
 LANGUAGE 0x09, 0x01 // English (United States).
 
 IDI_APPICON     ICON    "app.ico"
+IDI_TASKBAR_V5  ICON    "app.ico"
 IDR_LOGO_PNG    RCDATA  "logo_ui.png"
 
 STRINGTABLE

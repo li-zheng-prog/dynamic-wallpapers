@@ -3364,7 +3364,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     const DWORD iconAttr = GetFileAttributesW(shellIcon.c_str());
     SetShellWindowRelaunch(g_app.hwnd, exe,
                           iconAttr != INVALID_FILE_ATTRIBUTES && !(iconAttr & FILE_ATTRIBUTE_DIRECTORY)
-                              ? shellIcon + L",0" : exe + L",-" + std::to_wstring(IDI_APPICON),
+                              ? shellIcon + L",0" : exe + L",-" + std::to_wstring(IDI_TASKBAR_V5),
                           L" --show", IDS_SHELL_TITLE, kShellAppId);
 
     // Windows 11 rounded corners/shadows and a theme-aware dark title bar.
