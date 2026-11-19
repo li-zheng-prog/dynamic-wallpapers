@@ -17,6 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"       # MSYS path for cp/cd.
 ROOTW="$(cd "$(dirname "$0")/.." && pwd -W)"   # Windows path for native tools.
 BUILD="D:/DynamicWallpapers_build"
 DIST="$ROOT/dist"
+LOGO="$ROOTW/logo.png"
 # APPEXE and PORTABLE have different purposes:
 #   APPEXE is the compiled and installed filename referenced by setup.cpp kAppExe.
 #   Shortcuts and uninstall entries rely on it; do not append -portable here.
@@ -33,11 +34,11 @@ rm -rf "$BUILD"
 mkdir -p "$BUILD/src" "$BUILD/setup" "$BUILD/payload/themes" "$DIST"
 
 echo "==> Copying source files"
-cp "$ROOT"/src/*.cpp "$ROOT"/src/*.h "$ROOT"/src/*.rc "$BUILD/src/"
+cp "$ROOT"/src/*.cpp "$ROOT"/src/*.h "$ROOT"/src/*.rc "$ROOT"/src/*.manifest "$BUILD/src/"
 cp "$ROOT"/setup/*.cpp "$ROOT"/setup/*.rc "$BUILD/setup/"
 
-echo "==> Generating icons"
-python "$ROOTW/build/make_icon.py" "$BUILD/src/app.ico"
+echo "==> Generating shared application and installer icons"
+python "$ROOTW/build/make_icon.py" "$BUILD/src/app.ico" "$LOGO"
 
 echo "==> Compiling application"
 cd "$BUILD/src"
@@ -58,7 +59,8 @@ cp "$BUILD/src/$APPEXE" "$BUILD/payload/"
 cp -r "$ROOT/themes/." "$BUILD/payload/themes/"
 
 echo "==> Generating payload resources"
-python "$ROOTW/build/pack_setup.py" "$BUILD/payload" "$BUILD/setup"
+python "$ROOTW/build/pack_setup.py" "$BUILD/payload" "$BUILD/setup" \
+    "$BUILD/src/app.ico" DynamicWallpapers-logo-v4.ico
 
 echo "==> Compiling installer"
 cd "$BUILD/setup"

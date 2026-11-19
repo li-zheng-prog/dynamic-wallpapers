@@ -36,6 +36,8 @@ extern "C" __declspec(dllimport) unsigned int __stdcall timeEndPeriod(unsigned i
 #include "resource.h"
 #include "thumbs.h"
 #include "wallpaper_state.h"
+#include "install_locale.h"
+#include "shell_identity.h"
 
 #pragma comment(lib, "shell32")
 
@@ -187,7 +189,7 @@ struct App {
     std::vector<ID2D1Bitmap*> thumbs;
     std::vector<char> thumbTried;           // Do not retry failed thumbnails every frame.
     std::vector<char> delVisible;           // Only hit-test card actions that were actually drawn in the previous frame.
-    ID2D1Bitmap* logoBmp = nullptr;         // Embedded title-bar logo; fallback to a drawn sun/moon.
+    ID2D1Bitmap* logoBmp = nullptr;         // Embedded title-bar logo.
     bool logoTried = false;
     ID2D1LinearGradientBrush* bgBrush = nullptr;
     ID2D1Layer* uiLayer = nullptr;          // Whole-frame opacity for window fades and disabled schedule controls.
@@ -386,7 +388,7 @@ static void ComputeLayout(Layout& L) {
     y += 36;
 
     // Keep the status row and bottom action at the bottom when the window is taller than the content.
-    const float statusH = 48;
+    const float statusH = 24;
     const float bottomBlock = statusH + 10 + Ui::ButtonH + 24;
     float statusTop = y;
     float stickTop = H - bottomBlock;
@@ -632,8 +634,8 @@ static void WallpaperApplyFailed() {
     g_app.appliedImage.clear();
     g_app.appliedStyle = -1;
     g_app.statusMsg = g_app.wallpaper.attempts >= WallpaperTracker::maxAttempts
-        ? L"Switch failed. Choose Apply now to retry."
-        : L"Wallpaper change unconfirmed. Retrying...";
+        ? AppText(L"Switch failed. Choose Apply now to retry.", L"切换失败。请选择「立即应用」重试。")
+        : AppText(L"Wallpaper change unconfirmed. Retrying...", L"尚未确认壁纸切换，正在重试…");
     g_app.statusMsgUntil = GetTickCount64() + 6000;
 }
 
@@ -663,7 +665,7 @@ static void CheckExternalWallpaper(ULONGLONG now = GetTickCount64()) {
         g_app.appliedImage = g_app.wallpaper.target;
         g_app.appliedStyle = g_app.wallpaper.style;
         g_app.statusMsg = SameWallpaperPath(g_app.appliedImage, day)
-            ? L"Light wallpaper applied" : L"Dark wallpaper applied";
+            ? AppText(L"Light wallpaper applied", L"已应用浅色壁纸") : AppText(L"Dark wallpaper applied", L"已应用深色壁纸");
         g_app.statusMsgUntil = GetTickCount64() + 4000;
         if (g_app.glass) EnsureGlassBitmap(true);
     } else if (result == WallpaperTracker::Result::TimedOut) {
@@ -675,7 +677,7 @@ static void CheckExternalWallpaper(ULONGLONG now = GetTickCount64()) {
         g_app.appliedImage.clear();
         g_app.appliedStyle = -1;
         g_app.wallpaper.ResetSelection();
-        g_app.statusMsg = L"External wallpaper detected. Theme deselected.";
+        g_app.statusMsg = AppText(L"External wallpaper detected. Theme deselected.", L"检测到外部修改，已取消选中的主题。");
         g_app.statusMsgUntil = GetTickCount64() + 6000;
         SaveConfig(g_app.cfg);
         if (g_app.glass) EnsureGlassBitmap(true);
@@ -734,7 +736,7 @@ static void ApplyCurrent(bool force, bool explicitRequest) {
     if (generation != g_app.wallpaper.generation) return;
     g_app.wallpaper.Applied(ok);
     if (ok) {
-        g_app.statusMsg = L"Confirming wallpaper change...";
+        g_app.statusMsg = AppText(L"Confirming wallpaper change...", L"正在确认壁纸切换…");
         g_app.statusMsgUntil = GetTickCount64() + 4000;
         CheckExternalWallpaper();
     } else {
@@ -749,7 +751,6 @@ static void ApplyCurrent(bool force, bool explicitRequest) {
 // ---------------------------------------------------------------------------
 static void DrawTitleBar(Gfx& g, const Palette& p) {
     // Draw the embedded IDR_LOGO_PNG logo at 20 DIPs; its shape is baked into the image.
-    // Fall back to a hand-drawn sun and moon.
     float ix = 24, iy = Ui::TitleBarH / 2;
     if (!g_app.logoBmp && !g_app.logoTried) {
         g_app.logoTried = true;
@@ -760,15 +761,6 @@ static void DrawTitleBar(Gfx& g, const Palette& p) {
         D2D1_RECT_F dst = D2D1::RectF(ix - s / 2, iy - s / 2, ix + s / 2, iy + s / 2);
         g.dc()->DrawBitmap(g_app.logoBmp, dst, 1.0f,
                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
-    } else {
-        ID2D1SolidColorBrush* b = g.brush(ColHex(0xFFB900));
-        if (b) g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ix - 2.5f, iy), 6.5f, 6.5f), b);
-        ID2D1SolidColorBrush* mc = g.brush(p.textPrimary);
-        if (mc) {
-            g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ix + 4.0f, iy), 6.5f, 6.5f), mc);
-            ID2D1SolidColorBrush* cut = g.brush(p.windowBgTop);
-            if (cut) g.dc()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ix + 6.6f, iy - 1.6f), 5.6f, 5.6f), cut);
-        }
     }
     IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     g.textOptical(kAppDisplay, f, D2D1::RectF(46, 0, 400, Ui::TitleBarH), p.textPrimary);
@@ -788,13 +780,13 @@ static void DrawThemes(Gfx& g, const Palette& p) {
     if ((int)g_app.delVisible.size() != kThemeSlots) g_app.delVisible.assign(kThemeSlots, 0);
     for (int i = 0; i < kThemeSlots; ++i) g_app.delVisible[i] = 0;   // Clear the previous frame's action visibility flags.
     UiSectionTitle(g, L.themeSectionTitle.left, L.themeSectionTitle.top,
-                   L.themeSectionTitle.right - L.themeSectionTitle.left, L"Themes", p);
-    UiTextButton(g, L.addThemeBtn, L"Add theme", p, g_app.hot == CID_ADD_THEME,
+                   L.themeSectionTitle.right - L.themeSectionTitle.left, AppText(L"Themes", L"主题"), p);
+    UiTextButton(g, L.addThemeBtn, AppText(L"Add theme", L"添加主题"), p, g_app.hot == CID_ADD_THEME,
                  g_app.pressed == CID_ADD_THEME, L"\uE710");
     if (L.cardCount == 0) {
         IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_NORMAL,
                                       DWRITE_TEXT_ALIGNMENT_LEADING, true);
-        g.text(L"No themes yet. Click Add theme and choose a light and a dark wallpaper.",
+        g.text(AppText(L"No themes yet. Click Add theme and choose a light and a dark wallpaper.", L"暂无主题。选择「添加主题」，然后选取一张浅色壁纸和一张深色壁纸。"),
                f, D2D1::RectF(L.contentL, L.themeSectionTitle.top + 40, L.contentR,
                               L.themeSectionTitle.top + 88), p.textSecondary);
         return;
@@ -804,8 +796,8 @@ static void DrawThemes(Gfx& g, const Palette& p) {
         if (ti < 0 || ti >= L.cardCount || ti >= (int)g_app.themes.size()) continue;
         // New themes use light/dark pairs; show image counts for legacy multi-image themes.
         std::wstring sub = (g_app.themes[ti].imageCount == 2)
-                               ? L"Light + dark"
-                               : (std::to_wstring(g_app.themes[ti].imageCount) + L" images");
+                               ? AppText(L"Light + dark", L"浅色与深色")
+                               : (std::to_wstring(g_app.themes[ti].imageCount) + AppText(L" images", L" 张图片"));
         bool showDel = (g_app.hot == CID_THEME0 + ti || g_app.hot == CID_THEME_DEL0 + ti ||
                         g_app.hot == CID_THEME_REN0 + ti);
         bool delHot  = (g_app.hot == CID_THEME_DEL0 + ti);
@@ -821,11 +813,11 @@ static void DrawThemes(Gfx& g, const Palette& p) {
 static void DrawAppearance(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     UiSectionTitle(g, L.appearanceSectionTitle.left, L.appearanceSectionTitle.top,
-                   L.appearanceSectionTitle.right - L.appearanceSectionTitle.left, L"Appearance", p);
+                   L.appearanceSectionTitle.right - L.appearanceSectionTitle.left, AppText(L"Appearance", L"外观"), p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    g.textOptical(L"App theme", f, D2D1::RectF(L.contentL, L.appearanceSeg.top, L.appearanceSeg.left - 12, L.appearanceSeg.bottom),
+    g.textOptical(AppText(L"App theme", L"应用外观"), f, D2D1::RectF(L.contentL, L.appearanceSeg.top, L.appearanceSeg.left - 12, L.appearanceSeg.bottom),
                   p.textPrimary);
-    std::vector<std::wstring> items = {L"System", L"Light", L"Dark"};
+    std::vector<std::wstring> items = {AppText(L"System", L"跟随系统"), AppText(L"Light", L"浅色"), AppText(L"Dark", L"深色")};
     int hotSeg = -1;
     if (g_app.hot >= CID_APPEARANCE0 && g_app.hot <= CID_APPEARANCE2)
         hotSeg = g_app.hot - CID_APPEARANCE0;
@@ -841,16 +833,16 @@ static void DrawAppearance(Gfx& g, const Palette& p) {
 static void DrawSwitchSection(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     UiSectionTitle(g, L.switchSectionTitle.left, L.switchSectionTitle.top,
-                   L.switchSectionTitle.right - L.switchSectionTitle.left, L"Switching", p);
+                   L.switchSectionTitle.right - L.switchSectionTitle.left, AppText(L"Switching", L"壁纸切换"), p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    g.textOptical(L"Switch mode", f, D2D1::RectF(L.contentL, L.switchSeg.top, L.switchSeg.left - 12, L.switchSeg.bottom),
+    g.textOptical(AppText(L"Switch mode", L"切换模式"), f, D2D1::RectF(L.contentL, L.switchSeg.top, L.switchSeg.left - 12, L.switchSeg.bottom),
                   p.textPrimary);
     // Smooth indicator motion and press scaling also reflect mode changes from the tray menu.
     if (g_app.swTarget != g_app.cfg.switchMode) {
         g_app.swTarget = g_app.cfg.switchMode;
         StartAnim();
     }
-    std::vector<std::wstring> modes = {L"Schedule", L"System"};
+    std::vector<std::wstring> modes = {AppText(L"Schedule", L"定时切换"), AppText(L"System", L"跟随系统")};
     int hotSw = (g_app.hot == CID_SWITCH0) ? 0 : (g_app.hot == CID_SWITCH1 ? 1 : -1);
     UiSegmented(g, L.switchSeg, modes, g_app.cfg.switchMode, hotSw, p,
                 g_app.swAnim, g_app.swScale);
@@ -874,12 +866,12 @@ static void DrawTimeSection(Gfx& g, const Palette& p) {
         }
     }
     UiSectionTitle(g, L.timeSectionTitle.left, L.timeSectionTitle.top,
-                   L.timeSectionTitle.right - L.timeSectionTitle.left, L"Schedule", p);
+                   L.timeSectionTitle.right - L.timeSectionTitle.left, AppText(L"Schedule", L"定时切换"), p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
     // Align row labels with adjacent controls using optical vertical centering.
-    g.textOptical(L"Day starts", f, D2D1::RectF(L.contentL, L.dayStepper.top, L.dayStepper.left - 12, L.dayStepper.bottom),
+    g.textOptical(AppText(L"Day starts", L"日间开始"), f, D2D1::RectF(L.contentL, L.dayStepper.top, L.dayStepper.left - 12, L.dayStepper.bottom),
                   p.textPrimary);
-    g.textOptical(L"Night starts", f, D2D1::RectF(L.contentL, L.nightStepper.top, L.nightStepper.left - 12, L.nightStepper.bottom),
+    g.textOptical(AppText(L"Night starts", L"夜间开始"), f, D2D1::RectF(L.contentL, L.nightStepper.top, L.nightStepper.left - 12, L.nightStepper.bottom),
                   p.textPrimary);
     UiStepper(g, L.dayStepper, FormatHM(g_app.cfg.dayStart), p,
               g_app.hot == CID_DAY_MINUS ? 0 : (g_app.hot == CID_DAY_PLUS ? 1 : -1),
@@ -890,7 +882,7 @@ static void DrawTimeSection(Gfx& g, const Palette& p) {
     if (dim) {
         g.dc()->PopLayer();
         IDWriteTextFormat* fHint = g.format(FONT_UI, 12.0f);
-        g.textOptical(L"Following the system theme. Schedule is inactive.", fHint,
+        g.textOptical(AppText(L"Following the system theme. Schedule is inactive.", L"当前跟随系统外观，定时切换未启用。"), fHint,
                       D2D1::RectF(L.contentL, L.timeSectionTitle.top, L.contentR, L.timeSectionTitle.top + 20),
                       p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
@@ -899,11 +891,11 @@ static void DrawTimeSection(Gfx& g, const Palette& p) {
 static void DrawOptions(Gfx& g, const Palette& p) {
     const Layout& L = g_app.L;
     UiSectionTitle(g, L.optionSectionTitle.left, L.optionSectionTitle.top,
-                   L.optionSectionTitle.right - L.optionSectionTitle.left, L"Options", p);
+                   L.optionSectionTitle.right - L.optionSectionTitle.left, AppText(L"Options", L"选项"), p);
     IDWriteTextFormat* f = g.format(FONT_UI, 13.5f);
-    g.textOptical(L"Switch wallpapers automatically", f, D2D1::RectF(L.contentL, L.autoToggle.top, L.autoToggle.left - 12, L.autoToggle.bottom),
+    g.textOptical(AppText(L"Switch wallpapers automatically", L"自动切换壁纸"), f, D2D1::RectF(L.contentL, L.autoToggle.top, L.autoToggle.left - 12, L.autoToggle.bottom),
                   p.textPrimary);
-    g.textOptical(L"Start with Windows", f, D2D1::RectF(L.contentL, L.bootToggle.top, L.bootToggle.left - 12, L.bootToggle.bottom),
+    g.textOptical(AppText(L"Start with Windows", L"随 Windows 启动"), f, D2D1::RectF(L.contentL, L.bootToggle.top, L.bootToggle.left - 12, L.bootToggle.bottom),
                   p.textPrimary);
     UiToggle(g, L.autoToggle.left, L.autoToggle.top, g_app.cfg.autoSwitch, g_app.toggleAnim[0],
              g_app.hot == CID_AUTO, p);
@@ -912,66 +904,37 @@ static void DrawOptions(Gfx& g, const Palette& p) {
 }
 
 static void DrawStatus(Gfx& g, const Palette& p) {
-    const Layout& L = g_app.L;
-    const ThemeInfo* t = SelectedTheme();
-    const float firstRowBottom = L.statusRow.top + 24;
-    float cy = L.statusRow.top + 12;
-    int stage = TargetStage();
-    UiStatusDot(g, L.statusRow.left + 5, cy, stage == 1, p);
-
-    IDWriteTextFormat* fBold = g.format(FONT_UI, 13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    IDWriteTextFormat* fSmall = g.format(FONT_UI, 12.0f);
-    // Keep status details on the first line and schedule information on the second.
-    g.dc()->PushAxisAlignedClip(D2D1::RectF(L.statusRow.left, L.statusRow.top,
-        L.statusRow.right, firstRowBottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    float x = L.statusRow.left + 18;
-    auto run = [&](const std::wstring& s, IDWriteTextFormat* f, const D2D1_COLOR_F& c) {
-        if (s.empty()) return;
-        float w = g.textWidth(s, f);
-        g.textOptical(s, f, D2D1::RectF(x, L.statusRow.top, x + w + 2, firstRowBottom), c);
-        x += w + 7;
-    };
-    std::wstring cur = (stage == 0) ? L"Light" : L"Dark";
-    std::wstring src = (g_app.cfg.switchMode == 1) ? L"System"
-                                                   : (stage == 0 ? L"Daytime" : L"Nighttime");
-    run(t ? std::wstring(L"Current: ") + cur + L" (" + src + L")" : L"No theme selected", fBold, p.textPrimary);
-    if (g_app.simulateHour >= 0) run(L"Simulated", fSmall, p.accentText);
+    std::wstring feedback;
+    if (g_app.simulateHour >= 0) feedback = AppText(L"Simulated", L"模拟时间");
     if (!g_app.statusMsg.empty() && GetTickCount64() < g_app.statusMsgUntil) {
-        run(g_app.statusMsg, fSmall, p.accentText);
-    } else if (t) {
-        std::wstring img = stage == 0 ? t->dayImage : t->nightImage;
-        size_t sl = img.find_last_of(L"\\/");
-        run(sl == std::wstring::npos ? img : img.substr(sl + 1), fSmall, p.textSecondary);
+        if (!feedback.empty()) feedback += L"  ";
+        feedback += g_app.statusMsg;
     }
 
-    g.dc()->PopAxisAlignedClip();
-    // Second line: next switch countdown, system mode source, or paused state.
-    IDWriteTextFormat* fRight = g.format(FONT_UI, 12.0f);
-    if (!t) {
-        g.textOptical(L"Select a theme to enable wallpaper switching.", fRight,
-                      D2D1::RectF(L.contentL, firstRowBottom,
-                                  L.statusRow.right, L.statusRow.bottom),
-                      p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    std::wstring status;
+    if (!SelectedTheme()) {
+        status = AppText(L"Select a theme to enable wallpaper switching.", L"请先选择一个壁纸主题。");
     } else if (!g_app.cfg.autoSwitch) {
-        g.textOptical(L"Switching paused. Enable it from the tray menu.", fRight,
-                      D2D1::RectF(L.contentL, firstRowBottom,
-                                  L.statusRow.right, L.statusRow.bottom),
-                      p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
-    } else if (g_app.cfg.switchMode == 1) {
-        std::wstring right = std::wstring(L"Following Windows app mode (currently: ") +
-                             (SystemUsesDarkMode() ? L"Dark" : L"Light") + L")";
-        g.textOptical(right, fRight,
-                      D2D1::RectF(L.contentL, firstRowBottom,
-                                  L.statusRow.right, L.statusRow.bottom),
-                      p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
-    } else {
-        std::wstring right = std::wstring(L"Next switch: ") + FormatHM(NextSwitchAt(g_app.cfg, CurrentMinutes())) +
-                             L" (in " + FormatDuration(MinutesUntilSwitch(g_app.cfg, CurrentMinutes())) + L")";
-        g.textOptical(right, fRight,
-                      D2D1::RectF(L.contentL, firstRowBottom,
-                                  L.statusRow.right, L.statusRow.bottom),
-                      p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        status = AppText(L"Switching paused. Enable it from the tray menu.", L"壁纸切换已暂停，可从托盘菜单恢复。");
+    } else if (g_app.cfg.switchMode != 1) {
+        const int now = CurrentMinutes();
+        status = AppText(L"Next switch: ", L"下次切换：") + FormatHM(NextSwitchAt(g_app.cfg, now)) +
+                 AppText(L" (in ", L"（剩余 ") + FormatDuration(MinutesUntilSwitch(g_app.cfg, now)) +
+                 AppText(L")", L"）");
     }
+
+    if (feedback.empty() && status.empty()) return;
+    const auto& row = g_app.L.statusRow;
+    auto* f = g.format(FONT_UI, 12.0f);
+    constexpr float gap = 12.0f;
+    // Keep feedback readable when the two messages do not fit on the same line.
+    g.dc()->PushAxisAlignedClip(row, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (!status.empty() && (feedback.empty() ||
+        g.textWidth(feedback, f) + gap + g.textWidth(status, f) <= row.right - row.left)) {
+        g.textOptical(status, f, row, p.textSecondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+    if (!feedback.empty()) g.textOptical(feedback, f, row, p.accentText);
+    g.dc()->PopAxisAlignedClip();
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,11 +1147,12 @@ static bool PickImageFile(const std::wstring& title, std::wstring& outPath) {
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_IFileOpenDialog, (void**)&dlg)))
         return false;
-    COMDLG_FILTERSPEC filters[] = {{L"Images", L"*.jpg;*.jpeg;*.png;*.bmp"},
-                                   {L"All files", L"*.*"}};
+    COMDLG_FILTERSPEC filters[] = {{AppText(L"Images", L"图片"), L"*.jpg;*.jpeg;*.png;*.bmp"},
+                                   {AppText(L"All files", L"所有文件"), L"*.*"}};
     dlg->SetFileTypes(2, filters);
     dlg->SetFileTypeIndex(1);
     dlg->SetTitle(title.c_str());
+    dlg->SetOkButtonLabel(AppText(L"Open", L"打开"));
     DWORD opts = 0;
     dlg->GetOptions(&opts);
     dlg->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
@@ -1260,11 +1224,11 @@ static void OpenAddTheme() {
 static void PickAddThemeImage(bool light) {
     AddThemeUI& a = g_app.addUI;
     std::wstring path;
-    if (!PickImageFile(light ? L"Choose a light wallpaper" : L"Choose a dark wallpaper", path))
+    if (!PickImageFile(light ? AppText(L"Choose a light wallpaper", L"选择浅色壁纸") : AppText(L"Choose a dark wallpaper", L"选择深色壁纸"), path))
         return;
     ID2D1Bitmap* bmp = g_app.gfx.loadImage(path, 640);
     if (!bmp) {
-        a.hint = L"Cannot open this image. Use JPG, PNG, or BMP.";
+        a.hint = AppText(L"Cannot open this image. Use JPG, PNG, or BMP.", L"无法打开此图片。请选择 JPG、PNG 或 BMP 文件。");
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
@@ -1285,7 +1249,7 @@ static void PickAddThemeImage(bool light) {
     // Validate the image pair and clear stale errors.
     if (!a.lightPath.empty() && !a.darkPath.empty() &&
         _wcsicmp(a.lightPath.c_str(), a.darkPath.c_str()) == 0)
-        a.hint = L"Choose different images for light and dark modes.";
+        a.hint = AppText(L"Choose different images for light and dark modes.", L"请为浅色和深色模式选择不同的图片。");
     else
         a.hint.clear();
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -1295,17 +1259,17 @@ static void ConfirmAddTheme() {
     AddThemeUI& a = g_app.addUI;
     std::wstring nm = TrimStr(a.name.text);
     if (a.lightPath.empty() || a.darkPath.empty()) {
-        a.hint = L"Choose a light image and a dark image.";
+        a.hint = AppText(L"Choose a light image and a dark image.", L"请选择一张浅色图片和一张深色图片。");
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
     if (_wcsicmp(a.lightPath.c_str(), a.darkPath.c_str()) == 0) {
-        a.hint = L"Choose different images for light and dark modes.";
+        a.hint = AppText(L"Choose different images for light and dark modes.", L"请为浅色和深色模式选择不同的图片。");
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
     if (nm.empty()) {
-        a.hint = L"Enter a theme name.";
+        a.hint = AppText(L"Enter a theme name.", L"请输入主题名称。");
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
@@ -1319,7 +1283,7 @@ static void ConfirmAddTheme() {
     }
     std::wstring outName, err;
     if (!ImportTheme(nm, a.lightPath, a.darkPath, outName, &err)) {
-        a.hint = L"Could not add theme" + (err.empty() ? std::wstring(L"") : (L": " + err));
+        a.hint = AppText(L"Could not add theme", L"无法添加主题") + (err.empty() ? std::wstring(L"") : (L": " + err));
         InvalidateRect(g_app.hwnd, nullptr, FALSE);
         return;
     }
@@ -1334,7 +1298,7 @@ static void ConfirmAddTheme() {
     ComputeLayout(g_app.L);
     EnsureCardVisible(g_app.selIdx);     // Scroll the newly added theme into view if it is below the viewport.
     ApplyCurrent(true, true);
-    g_app.statusMsg = L"Theme added: " + outName;
+    g_app.statusMsg = AppText(L"Theme added: ", L"已添加主题：") + outName;
     g_app.statusMsgUntil = GetTickCount64() + 6000;
     CloseAddTheme();
 }
@@ -1396,7 +1360,7 @@ static void ConfirmRenameTheme() {
     ComputeLayout(g_app.L);
     EnsureCardVisible(g_app.selIdx);
     ApplyCurrent(true, true);
-    g_app.statusMsg = L"Theme renamed: " + oldName + L" → " + nm;
+    g_app.statusMsg = AppText(L"Theme renamed: ", L"已重命名主题：") + oldName + L" → " + nm;
     g_app.statusMsgUntil = GetTickCount64() + 6000;
     CloseRenameTheme();
 }
@@ -1449,7 +1413,7 @@ static void ConfirmDeleteTheme() {
     ComputeLayout(g_app.L);
     if (wasSelected) ApplyCurrent(true, true);     // If deleting the selected theme, switch to the next one immediately.
 
-    g_app.statusMsg = L"Theme deleted: " + t.name + L" (restore it from the Recycle Bin)";
+    g_app.statusMsg = AppText(L"Theme deleted: ", L"已删除主题：") + t.name + AppText(L" (restore it from the Recycle Bin)", L"（可从回收站恢复）");
     g_app.statusMsgUntil = GetTickCount64() + 6000;
     CloseDelTheme();
 }
@@ -1532,7 +1496,7 @@ static void DrawImageSlot(Gfx& g, const D2D1_RECT_F& r, ID2D1Bitmap* bmp, const 
             g.fillRound(rr, Col(0, 0, 0, pressed ? 0.34f : 0.24f));
             IDWriteTextFormat* f = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                             DWRITE_TEXT_ALIGNMENT_CENTER);
-            g.textOptical(L"Click to change", f, D2D1::RectF(r.left, r.top, r.right, r.bottom),
+            g.textOptical(AppText(L"Click to change", L"点击更换"), f, D2D1::RectF(r.left, r.top, r.right, r.bottom),
                           Col(1, 1, 1, 0.95f), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
     } else {
@@ -1566,21 +1530,21 @@ static void DrawAddThemeOverlay(Gfx& g, const Palette& p) {
     IDWriteTextFormat* fLabel = g.format(FONT_UI, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     float x0 = L.ovCard.left + 24, x1 = L.ovCard.right - 24;
 
-    g.textOptical(L"Add theme", fTitle, D2D1::RectF(x0, L.ovCard.top + 20, x1, L.ovCard.top + 50),
+    g.textOptical(AppText(L"Add theme", L"添加主题"), fTitle, D2D1::RectF(x0, L.ovCard.top + 20, x1, L.ovCard.top + 50),
                   p.textPrimary);
-    g.textOptical(L"Theme name", fLabel, D2D1::RectF(x0, L.ovCard.top + 54, x1, L.ovCard.top + 74),
+    g.textOptical(AppText(L"Theme name", L"主题名称"), fLabel, D2D1::RectF(x0, L.ovCard.top + 54, x1, L.ovCard.top + 74),
                   p.textSecondary);
-    DrawTextEdit(g, L.ovName, a.name, p, L"e.g. Desert, Sunrise...", true);
+    DrawTextEdit(g, L.ovName, a.name, p, AppText(L"e.g. Desert, Sunrise...", L"例如：沙漠、日出…"), true);
 
     auto caption = [&](const D2D1_RECT_F& slot, const wchar_t* t) {
         g.textOptical(t, fLabel, D2D1::RectF(slot.left, slot.top - 22, slot.right, slot.top - 2),
                       p.textSecondary);
     };
-    caption(L.ovLightSlot, L"Light");
-    caption(L.ovDarkSlot, L"Dark");
-    DrawImageSlot(g, L.ovLightSlot, a.lightBmp, L"Choose light image", p,
+    caption(L.ovLightSlot, AppText(L"Light", L"浅色"));
+    caption(L.ovDarkSlot, AppText(L"Dark", L"深色"));
+    DrawImageSlot(g, L.ovLightSlot, a.lightBmp, AppText(L"Choose light image", L"选择浅色图片"), p,
                   g_app.hot == CID_OV_LIGHT_SLOT, g_app.pressed == CID_OV_LIGHT_SLOT);
-    DrawImageSlot(g, L.ovDarkSlot, a.darkBmp, L"Choose dark image", p,
+    DrawImageSlot(g, L.ovDarkSlot, a.darkBmp, AppText(L"Choose dark image", L"选择深色图片"), p,
                   g_app.hot == CID_OV_DARK_SLOT, g_app.pressed == CID_OV_DARK_SLOT);
 
     // Bottom hint: accent color on error; otherwise show the destination directory.
@@ -1599,17 +1563,17 @@ static void DrawAddThemeOverlay(Gfx& g, const Palette& p) {
     else if (ready) {
         std::wstring dir = UserThemeDir(), exe = ExeDir(), shown = dir;
         if (!exe.empty() && dir.rfind(exe, 0) == 0)          // Show a relative path when the destination is inside the app directory.
-            shown = L"App directory" + dir.substr(exe.size());
-        hint = L"Copy both images to " + shown + L"\\" + nm +
-               L"\\ (originals remain unchanged)";
+            shown = AppText(L"App directory", L"应用目录") + dir.substr(exe.size());
+        hint = AppText(L"Copy both images to ", L"将两张图片复制到 ") + shown + L"\\" + nm +
+               AppText(L"\\ (originals remain unchanged)", L"\\（保留原文件）");
     }
     if (!hint.empty())
         g.text(hint, fSub, D2D1::RectF(x0, L.ovCard.bottom - 120, x1, L.ovCard.bottom - 68),
                       hintIsError ? p.accentText : p.textSecondary);
 
-    UiButton(g, L.ovCancel, L"Cancel", p, false, g_app.hot == CID_OV_CANCEL,
+    UiButton(g, L.ovCancel, AppText(L"Cancel", L"取消"), p, false, g_app.hot == CID_OV_CANCEL,
              g_app.pressed == CID_OV_CANCEL);
-    UiButton(g, L.ovOk, L"Add", p, true, g_app.hot == CID_OV_OK, g_app.pressed == CID_OV_OK,
+    UiButton(g, L.ovOk, AppText(L"Add", L"添加"), p, true, g_app.hot == CID_OV_OK, g_app.pressed == CID_OV_OK,
              ready, L"\uE710");
 }
 
@@ -1632,24 +1596,24 @@ static void DrawRenameDialog(Gfx& g, const Palette& p) {
     IDWriteTextFormat* fPath  = g.format(FONT_UI, 11.0f);
     float x0 = L.renCard.left + 24, x1 = L.renCard.right - 24;
 
-    g.textOptical(L"Rename theme: " + oldName, fTitle,
+    g.textOptical(AppText(L"Rename theme: ", L"重命名主题：") + oldName, fTitle,
                   D2D1::RectF(x0, L.renCard.top + 20, x1, L.renCard.top + 48), p.textPrimary);
-    g.textOptical(L"Renames the folder; images stay unchanged.", fSub,
+    g.textOptical(AppText(L"Renames the folder; images stay unchanged.", L"仅重命名文件夹，图片不会更改。"), fSub,
                   D2D1::RectF(x0, L.renCard.top + 54, x1, L.renCard.top + 76), p.textSecondary);
     // Shorten app-relative paths to avoid clipping long absolute paths.
     std::wstring shown = folder;
     std::wstring exe = ExeDir();
-    if (!exe.empty() && folder.rfind(exe, 0) == 0) shown = L"App directory" + folder.substr(exe.size());
+    if (!exe.empty() && folder.rfind(exe, 0) == 0) shown = AppText(L"App directory", L"应用目录") + folder.substr(exe.size());
     g.textOptical(shown, fPath, D2D1::RectF(x0, L.renCard.top + 78, x1, L.renCard.top + 98),
                   p.textTertiary);
-    DrawTextEdit(g, L.renField, r.name, p, L"New name", true);
+    DrawTextEdit(g, L.renField, r.name, p, AppText(L"New name", L"新名称"), true);
     if (!r.hint.empty()) {
         g.text(r.hint, fSub, D2D1::RectF(x0, L.renCard.top + 146, x1, L.renCard.top + 198),
                       p.accentText);
     }
-    UiButton(g, L.renCancel, L"Cancel", p, false, g_app.hot == CID_REN_CANCEL,
+    UiButton(g, L.renCancel, AppText(L"Cancel", L"取消"), p, false, g_app.hot == CID_REN_CANCEL,
              g_app.pressed == CID_REN_CANCEL);
-    UiButton(g, L.renOk, L"Save", p, true, g_app.hot == CID_REN_OK, g_app.pressed == CID_REN_OK,
+    UiButton(g, L.renOk, AppText(L"Save", L"保存"), p, true, g_app.hot == CID_REN_OK, g_app.pressed == CID_REN_OK,
              !TrimStr(r.name.text).empty());
 }
 
@@ -1673,9 +1637,9 @@ static void DrawDelThemeDialog(Gfx& g, const Palette& p) {
                                          DWRITE_TEXT_ALIGNMENT_LEADING, true);
     float x0 = L.dlgCard.left + 24, x1 = L.dlgCard.right - 24, y0 = L.dlgCard.top;
 
-    g.textOptical(L"Delete theme: " + name + L"?", fTitle,
+    g.textOptical(AppText(L"Delete theme: ", L"删除主题：") + name + L"?", fTitle,
                   D2D1::RectF(x0, y0 + 20, x1, y0 + 48), p.textPrimary);
-    g.text(L"Move this theme to the Recycle Bin. You can restore it later. Original images stay unchanged.",
+    g.text(AppText(L"Move this theme to the Recycle Bin. You can restore it later. Original images stay unchanged.", L"主题将移到回收站，可随时恢复。原始图片不会更改。"),
            fBody, D2D1::RectF(x0, y0 + 56, x1, y0 + 92), p.textSecondary);
     g.text(folder, fPath, D2D1::RectF(x0, y0 + 92, x1, y0 + 132), p.textTertiary);
     if (!d.err.empty()) {
@@ -1684,7 +1648,7 @@ static void DrawDelThemeDialog(Gfx& g, const Palette& p) {
         g.text(d.err, fErr, D2D1::RectF(x0, y0 + 132, x1, y0 + 184), ColHex(0xC42B1C));
     }
 
-    UiButton(g, L.dlgCancel, L"Cancel", p, false, g_app.hot == CID_DLG_CANCEL,
+    UiButton(g, L.dlgCancel, AppText(L"Cancel", L"取消"), p, false, g_app.hot == CID_DLG_CANCEL,
              g_app.pressed == CID_DLG_CANCEL);
     // Use a temporary danger-accent palette for the Delete button.
     Palette pd = p;
@@ -1692,7 +1656,7 @@ static void DrawDelThemeDialog(Gfx& g, const Palette& p) {
     pd.accentHover   = ColHex(0xD13A2B);
     pd.accentPressed = ColHex(0xA82318);
     pd.textOnAccent  = Col(1, 1, 1, 1);
-    UiButton(g, L.dlgOk, L"Delete", pd, true, g_app.hot == CID_DLG_OK, g_app.pressed == CID_DLG_OK);
+    UiButton(g, L.dlgOk, AppText(L"Delete", L"删除"), pd, true, g_app.hot == CID_DLG_OK, g_app.pressed == CID_DLG_OK);
 }
 
 // ---------------------------------------------------------------------------
@@ -1898,7 +1862,7 @@ static void RenderFrame() {
     DrawStatus(g, p);
 
     // Bottom action; settings apply automatically, while Apply now is available in the tray menu.
-    UiButton(g, g_app.L.openThemesBtn, L"Open themes folder", p, false,
+    UiButton(g, g_app.L.openThemesBtn, AppText(L"Open themes folder", L"打开主题文件夹"), p, false,
              g_app.hot == CID_OPENTHEMES, g_app.pressed == CID_OPENTHEMES, true, L"\uE838");
 
     g.dc()->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -1923,24 +1887,24 @@ static void RenderFrame() {
 // ---------------------------------------------------------------------------
 static void TrayMenu() {
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, 1, L"Show window");
-    AppendMenuW(m, MF_STRING, 2, L"Apply now");
+    AppendMenuW(m, MF_STRING, 1, AppText(L"Show window", L"打开主窗口"));
+    AppendMenuW(m, MF_STRING, 2, AppText(L"Apply now", L"立即应用"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_app.cfg.autoSwitch ? MF_CHECKED : 0), 3, L"Switch wallpapers automatically");
+    AppendMenuW(m, MF_STRING | (g_app.cfg.autoSwitch ? MF_CHECKED : 0), 3, AppText(L"Switch wallpapers automatically", L"自动切换壁纸"));
     // Switch-mode submenu shares the main window's setting.
     HMENU swmode = CreatePopupMenu();
-    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 0 ? MF_CHECKED : 0), 21, L"Schedule");
-    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 1 ? MF_CHECKED : 0), 22, L"Follow system theme");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)swmode, L"Switch mode");
-    AppendMenuW(m, MF_STRING | (g_app.cfg.startOnBoot ? MF_CHECKED : 0), 4, L"Start with Windows");
+    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 0 ? MF_CHECKED : 0), 21, AppText(L"Schedule", L"定时切换"));
+    AppendMenuW(swmode, MF_STRING | (g_app.cfg.switchMode == 1 ? MF_CHECKED : 0), 22, AppText(L"Follow system theme", L"跟随系统外观"));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)swmode, AppText(L"Switch mode", L"切换模式"));
+    AppendMenuW(m, MF_STRING | (g_app.cfg.startOnBoot ? MF_CHECKED : 0), 4, AppText(L"Start with Windows", L"随 Windows 启动"));
     // Appearance submenu shares the main window's setting.
     HMENU appearance = CreatePopupMenu();
-    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 0 ? MF_CHECKED : 0), 11, L"System");
-    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 1 ? MF_CHECKED : 0), 12, L"Light");
-    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 2 ? MF_CHECKED : 0), 13, L"Dark");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)appearance, L"Appearance");
+    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 0 ? MF_CHECKED : 0), 11, AppText(L"System", L"跟随系统"));
+    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 1 ? MF_CHECKED : 0), 12, AppText(L"Light", L"浅色"));
+    AppendMenuW(appearance, MF_STRING | (g_app.cfg.appearance == 2 ? MF_CHECKED : 0), 13, AppText(L"Dark", L"深色"));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)appearance, AppText(L"Appearance", L"外观"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, 9, L"Quit");
+    AppendMenuW(m, MF_STRING, 9, AppText(L"Quit", L"退出"));
     SetForegroundWindow(g_app.hwnd);
     POINT pt;
     GetCursorPos(&pt);
@@ -2320,7 +2284,7 @@ static void StartWindowAnim(bool show) {
 static bool EnsureUiInitialized() {
     if (g_app.gfx.dc()) return true;
     if (!g_app.gfx.init(g_app.hwnd)) {
-        MessageBoxW(g_app.hwnd, L"Graphics initialization failed. DirectX 11 and Windows 10 or later are required.",
+        MessageBoxW(g_app.hwnd, AppText(L"Graphics initialization failed. DirectX 11 and Windows 10 or later are required.", L"图形初始化失败。需要 DirectX 11 和 Windows 10 或更高版本。"),
                     kAppDisplay, MB_OK | MB_ICONERROR);
         return false;
     }
@@ -2363,9 +2327,10 @@ static void HideMainWindow() {
         nid.hWnd = g_app.hwnd;
         nid.uID = 1;
         nid.uFlags = NIF_INFO;
-        wcscpy_s(nid.szInfoTitle, L"Still running in the background");
-        wcscpy_s(nid.szInfo, L"The app is in the system tray and will keep switching wallpapers. Click the tray icon to reopen it, or right-click to quit.");
-        nid.dwInfoFlags = NIIF_INFO;
+        wcscpy_s(nid.szInfoTitle, AppText(L"Still running in the background", L"应用仍在后台运行"));
+        wcscpy_s(nid.szInfo, AppText(L"The app is in the system tray and will keep switching wallpapers. Click the tray icon to reopen it, or right-click to quit.", L"应用已最小化到系统托盘，将继续切换壁纸。点击托盘图标可重新打开，右键单击可退出。"));
+        nid.hBalloonIcon = (HICON)SendMessageW(g_app.hwnd, WM_GETICON, ICON_BIG, 0);
+        nid.dwInfoFlags = nid.hBalloonIcon ? NIIF_USER | NIIF_LARGE_ICON : NIIF_INFO;
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
     StartWindowAnim(false);
@@ -2496,7 +2461,7 @@ static std::wstring RegisteredInstallDir() {
     wchar_t buf[MAX_PATH * 2] = {0};
     DWORD sz = sizeof(buf);
     if (RegGetValueW(HKEY_CURRENT_USER,
-                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DynamicWallpapers",
+                     kUninstallKey,
                      L"InstallLocation", RRF_RT_REG_SZ, nullptr, buf, &sz) != ERROR_SUCCESS)
         return L"";
     return buf;
@@ -2528,13 +2493,22 @@ static bool ShouldRemoveInstallDir(const std::wstring& exeDir, const std::wstrin
 static void DoUninstall() {
     const std::wstring regDir = RegisteredInstallDir();     // Read the uninstall entry before it is removed below.
     const bool removeDir = ShouldRemoveInstallDir(ExeDir(), regDir);
+    const bool chinese = InstalledLanguageIsChinese();
+    auto tr = [chinese](const wchar_t* english, const wchar_t* zh) { return chinese ? zh : english; };
+    const wchar_t* title = tr(L"Dynamic Wallpapers Uninstall", L"卸载 Dynamic Wallpapers");
 
     // Explain exactly what will be removed; portable installs retain their parent directory.
-    std::wstring msg = L"Uninstall Dynamic Wallpapers?\n\nThis will remove: ";
-    msg += removeDir ? L"the application folder, " : L"the application file (its parent folder will be kept), ";
-    msg += L"desktop and Start menu shortcuts, startup entries, settings, and user themes."
-           L" (%APPDATA%\\Dynamic Wallpapers).";
-    if (MessageBoxW(g_app.hwnd, msg.c_str(), L"Confirm uninstall", MB_YESNO | MB_ICONQUESTION) != IDYES)
+    const wchar_t* location = removeDir
+        ? tr(L"This will remove the application folder.", L"这将删除应用文件夹。")
+        : tr(L"This will remove the application file and keep its parent folder.",
+             L"这将删除应用文件，但保留其所在文件夹。");
+    std::wstring msg = std::wstring(location) + L"\n\n" +
+        tr(L"Desktop and Start menu shortcuts, startup entries, settings, and user themes will also be removed."
+           L" User data is stored in %APPDATA%\\Dynamic Wallpapers.",
+           L"桌面和开始菜单快捷方式、启动项、设置和用户主题也将被删除。"
+           L"用户数据位于 %APPDATA%\\Dynamic Wallpapers。");
+    if (!InstallDialog(nullptr, title, tr(L"Uninstall Dynamic Wallpapers?", L"确定卸载 Dynamic Wallpapers 吗？"),
+                       msg.c_str(), TD_WARNING_ICON, tr(L"Uninstall", L"卸载"), tr(AppText(L"Cancel", L"取消"), L"取消")))
         return;
 
     // Ask the running instance to quit so its executable can be removed.
@@ -2570,7 +2544,7 @@ static void DoUninstall() {
         DeleteFileW(JoinPath(desktop, std::wstring(kLegacyDisplay) + L".lnk").c_str());
     }
     // Remove current and legacy uninstall registry entries.
-    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DynamicWallpapers");
+    RegDeleteTreeW(HKEY_CURRENT_USER, kUninstallKey);
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\TimeWall");
     // Remove current and legacy settings/user-theme directories.
     std::vector<std::wstring> dirs = { AppDataDir() };
@@ -2590,8 +2564,9 @@ static void DoUninstall() {
     }
     // Show completion before scheduling self-deletion; otherwise the message box keeps
     // the process alive and locks the executable.
-    MessageBoxW(nullptr, L"Uninstall complete. The application files will be removed in a few seconds.", kAppDisplay,
-                MB_OK | MB_ICONINFORMATION);
+    InstallDialog(nullptr, title, tr(L"Uninstall complete", L"卸载完成"),
+                  tr(L"The application files will be removed in a few seconds.", L"应用文件将在几秒后移除。"),
+                  TD_INFORMATION_ICON, tr(L"OK", L"确定"));
 
     std::wstring exeDir = ExeDir();
     std::wstring self = ExePath();
@@ -3196,6 +3171,9 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY);
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    SetCurrentProcessExplicitAppUserModelID(kShellAppId);
+    g_appChinese = InstalledLanguageIsChinese();
+    g_app.gfx.setTextLocale(g_appChinese);
 
     // Command-line arguments.
     int argc = 0;
@@ -3316,7 +3294,7 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
             std::wstring outName, err;
             // Require two distinct images, one light and one dark.
             if (dayImg == nightImg) {
-                g_app.statusMsg = L"Import failed: choose two different images, one light and one dark.";
+                g_app.statusMsg = AppText(L"Import failed: choose two different images, one light and one dark.", L"导入失败，请分别为浅色和深色模式选择不同的图片。");
                 g_app.statusMsgUntil = GetTickCount64() + 8000;
             } else if (ImportTheme(name, dayImg, nightImg, outName, &err)) {
                 g_app.cfg.theme = outName;
@@ -3325,10 +3303,10 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                 g_app.themes = ScanThemes();
                 for (size_t i = 0; i < g_app.themes.size(); ++i)
                     if (g_app.themes[i].name == outName) g_app.selIdx = (int)i;
-                g_app.statusMsg = L"Theme added: " + outName;
+                g_app.statusMsg = AppText(L"Theme added: ", L"已添加主题：") + outName;
                 g_app.statusMsgUntil = GetTickCount64() + 8000;
             } else {
-                g_app.statusMsg = L"Import failed" + (err.empty() ? std::wstring(L"") : (L": " + err));
+                g_app.statusMsg = AppText(L"Import failed", L"导入失败") + (err.empty() ? std::wstring(L"") : (L": " + err));
                 g_app.statusMsgUntil = GetTickCount64() + 8000;
             }
         }
@@ -3378,6 +3356,17 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
                                  sx, sy, w, h, nullptr, nullptr, hInst, nullptr);
     if (!g_app.hwnd) return 1;
 
+    // Set the window icons before showing it so the taskbar can use the embedded mark.
+    if (wc.hIcon) SendMessageW(g_app.hwnd, WM_SETICON, ICON_BIG, (LPARAM)wc.hIcon);
+    if (wc.hIconSm) SendMessageW(g_app.hwnd, WM_SETICON, ICON_SMALL, (LPARAM)wc.hIconSm);
+    const std::wstring exe = ExePath();
+    const std::wstring shellIcon = JoinPath(ExeDir(), kShellIconFile);
+    const DWORD iconAttr = GetFileAttributesW(shellIcon.c_str());
+    SetShellWindowRelaunch(g_app.hwnd, exe,
+                          iconAttr != INVALID_FILE_ATTRIBUTES && !(iconAttr & FILE_ATTRIBUTE_DIRECTORY)
+                              ? shellIcon + L",0" : exe + L",-" + std::to_wstring(IDI_APPICON),
+                          L" --show", IDS_SHELL_TITLE, kShellAppId);
+
     // Windows 11 rounded corners/shadows and a theme-aware dark title bar.
     int corner = 2;   // DWMWCP_ROUND
     DwmSetWindowAttribute(g_app.hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
@@ -3405,17 +3394,17 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         if (backdrop) {
             g_app.liveGlass = true;
             g_app.glass = false;
-            g_app.statusMsg = L"Background: system acrylic (live blur)";
+            g_app.statusMsg = AppText(L"Background: system acrylic (live blur)", L"背景：系统亚克力（实时模糊）");
         } else if (selfGlass && !forceSolid) {
             g_app.glass = true;
             g_app.liveGlass = false;
             EnsureGlassBitmap(true);
-            g_app.statusMsg = L"Background: custom blur (from wallpaper)";
+            g_app.statusMsg = AppText(L"Background: custom blur (from wallpaper)", L"背景：自定义壁纸模糊");
         } else {
             g_app.glass = false;
             g_app.liveGlass = false;
             g_app.solidBg = true;
-            g_app.statusMsg = L"Background: solid color (follows app theme)";
+            g_app.statusMsg = AppText(L"Background: solid color (follows app theme)", L"背景：纯色（跟随应用外观）");
         }
         g_app.statusMsgUntil = GetTickCount64() + 5000;
     } else {

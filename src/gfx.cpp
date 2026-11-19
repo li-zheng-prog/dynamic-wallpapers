@@ -19,6 +19,39 @@ static bool ColorEq(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
     return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
 }
 
+static IDWriteFontFallback* CreateUiFontFallback(IDWriteFactory* factory) {
+    IDWriteFontCollection* fonts = nullptr;
+    if (FAILED(factory->GetSystemFontCollection(&fonts))) return nullptr;
+    const wchar_t* families[] = {L"NSimSun"};
+    UINT32 index = 0;
+    BOOL installed = FALSE;
+    const HRESULT lookup = fonts->FindFamilyName(families[0], &index, &installed);
+    fonts->Release();
+    if (FAILED(lookup) || !installed) return nullptr;
+
+    IDWriteFactory2* factory2 = nullptr;
+    if (FAILED(factory->QueryInterface(IID_PPV_ARGS(&factory2)))) return nullptr;
+    IDWriteFontFallbackBuilder* builder = nullptr;
+    IDWriteFontFallback* systemFallback = nullptr;
+    IDWriteFontFallback* result = nullptr;
+    const DWRITE_UNICODE_RANGE ranges[] = {
+        {0x2E80, 0x2FDF}, {0x3000, 0x303F}, {0x31C0, 0x31EF},
+        {0x3400, 0x4DBF}, {0x4E00, 0x9FFF}, {0xF900, 0xFAFF},
+        {0xFE30, 0xFE4F}, {0xFF01, 0xFF60}, {0xFFE0, 0xFFE6}, {0x20000, 0x2FA1F},
+    };
+    // Prefer NSimSun for CJK fallback glyphs, then retain the system's full fallback chain.
+    if (SUCCEEDED(factory2->GetSystemFontFallback(&systemFallback)) &&
+        SUCCEEDED(factory2->CreateFontFallbackBuilder(&builder)) &&
+        SUCCEEDED(builder->AddMapping(ranges, ARRAYSIZE(ranges), families, ARRAYSIZE(families),
+                                      nullptr, nullptr, nullptr, 1.0f)) &&
+        SUCCEEDED(builder->AddMappings(systemFallback)))
+        builder->CreateFontFallback(&result);
+    if (builder) builder->Release();
+    if (systemFallback) systemFallback->Release();
+    factory2->Release();
+    return result;
+}
+
 bool Gfx::init(HWND hwnd) {
     hwnd_ = hwnd;
     dpi_ = GetDpiForWindow(hwnd);
@@ -61,6 +94,7 @@ bool Gfx::init(HWND hwnd) {
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                                    (IUnknown**)&dwrite_)))
         return bail();
+    uiFontFallback_ = CreateUiFontFallback(dwrite_);
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                      __uuidof(IWICImagingFactory), (void**)&wic_);
 
@@ -173,6 +207,7 @@ void Gfx::shutdown() {
     if (dcompTarget_) { dcompTarget_->Release(); dcompTarget_ = nullptr; }
     if (dcomp_) { dcomp_->Release(); dcomp_ = nullptr; }
     if (wic_) { wic_->Release(); wic_ = nullptr; }
+    if (uiFontFallback_) { uiFontFallback_->Release(); uiFontFallback_ = nullptr; }
     if (dwrite_) { dwrite_->Release(); dwrite_ = nullptr; }
     if (dc_) { dc_->Release(); dc_ = nullptr; }
     if (d2dDevice_) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
@@ -216,29 +251,47 @@ ID2D1SolidColorBrush* Gfx::brush(const D2D1_COLOR_F& color) {
 
 IDWriteTextFormat* Gfx::format(const wchar_t* families, float dipSize,
                                DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT align,
-                               bool wrap) {
-    FmtKey key{families, dipSize, (int)weight, (int)align, wrap};
+                               bool wrap, const wchar_t* locale) {
+    if (!dwrite_) return nullptr;
+    if (!locale) locale = chineseText_ ? L"zh-CN" : L"en-US";
+    FmtKey key{families ? families : L"", locale, dipSize, (int)weight, (int)align, wrap};
     for (auto& f : formats_)
-        if (f.first.fam == key.fam && f.first.size == key.size && f.first.weight == key.weight &&
+        if (f.first.fam == key.fam && f.first.locale == key.locale &&
+            f.first.size == key.size && f.first.weight == key.weight &&
             f.first.align == key.align && f.first.wrap == key.wrap)
             return f.second;
 
-    // Try comma-separated font families in order, then let DirectWrite choose a fallback.
-    std::wstring list = families;
+    // CreateTextFormat can succeed for a missing family; check the collection before choosing.
+    IDWriteFontCollection* fonts = nullptr;
+    dwrite_->GetSystemFontCollection(&fonts);
+    const std::wstring list = families ? families : L"Segoe UI";
     IDWriteTextFormat* fmt = nullptr;
     size_t start = 0;
+    auto create = [&](const wchar_t* family) {
+        return dwrite_->CreateTextFormat(family, fonts, weight, DWRITE_FONT_STYLE_NORMAL,
+                                        DWRITE_FONT_STRETCH_NORMAL, dipSize, locale, &fmt);
+    };
     while (true) {
         size_t comma = list.find(L',', start);
-        std::wstring one = list.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start);
-        if (!one.empty() &&
-            SUCCEEDED(dwrite_->CreateTextFormat(one.c_str(), nullptr, weight,
-                                                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                                dipSize, L"en-us", &fmt)))
+        std::wstring one = list.substr(start, comma == std::wstring::npos ? comma : comma - start);
+        UINT32 index = 0;
+        BOOL exists = FALSE;
+        if (fonts && SUCCEEDED(fonts->FindFamilyName(one.c_str(), &index, &exists)) && exists &&
+            SUCCEEDED(create(one.c_str())))
             break;
         if (comma == std::wstring::npos) break;
         start = comma + 1;
     }
+    if (!fmt) create(L"Segoe UI");
+    if (fonts) fonts->Release();
     if (!fmt) return nullptr;
+    if (!families && uiFontFallback_) {
+        IDWriteTextFormat1* format1 = nullptr;
+        if (SUCCEEDED(fmt->QueryInterface(IID_PPV_ARGS(&format1)))) {
+            format1->SetFontFallback(uiFontFallback_);
+            format1->Release();
+        }
+    }
     fmt->SetTextAlignment(align);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     fmt->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);

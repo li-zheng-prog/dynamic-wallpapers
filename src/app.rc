@@ -1,18 +1,27 @@
 // Application resources: icon, title-bar logo, and version metadata.
-// To replace the icon, update logo.png (square, preferably 512px or larger) and run build/build.sh.
+// To replace the icon, update the transparent square logo.png and run build/build.sh.
 // build/make_icon.py generates app.ico for the executable, tray, windows, and installer,
 // plus logo_ui.png for the title-bar logo embedded below as RCDATA.
 #include "resource.h"
+#include "version.h"
 #include <winver.h>
+
+LANGUAGE 0, 0
+IDR_DIALOG_MANIFEST 24  "common-controls.manifest"
 
 LANGUAGE 0x09, 0x01 // English (United States).
 
 IDI_APPICON     ICON    "app.ico"
 IDR_LOGO_PNG    RCDATA  "logo_ui.png"
 
+STRINGTABLE
+BEGIN
+    IDS_SHELL_TITLE "Dynamic Wallpapers"
+END
+
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION     1,0,0,0
- PRODUCTVERSION  1,0,0,0
+ FILEVERSION     DW_VERSION_NUM
+ PRODUCTVERSION  DW_VERSION_NUM
  FILEFLAGSMASK   0x3fL
  FILEFLAGS       0x0L
  FILEOS          VOS_NT_WINDOWS32
@@ -25,11 +34,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Dynamic Wallpapers"
             VALUE "FileDescription",  "Dynamic Wallpapers"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      DW_VERSION_TEXT
             VALUE "InternalName",     "DynamicWallpapers"
             VALUE "OriginalFilename", "DynamicWallpapers.exe"
             VALUE "ProductName",      "Dynamic Wallpapers"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   DW_VERSION_TEXT
             VALUE "LegalCopyright",   "MIT License"
         END
     END

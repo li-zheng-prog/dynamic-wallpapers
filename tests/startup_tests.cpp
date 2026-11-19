@@ -503,6 +503,131 @@ static void TestNativeMinimize() {
     std::puts("PASS: native minimize/restore, placement, maximized state, fade interruption");
 }
 
+static std::wstring MappedUiFont(IDWriteTextFormat* format, IDWriteFontCollection* fonts, UINT32 position) {
+    // Ask DirectWrite to map both positions in the same mixed-language string.
+    class MixedText final : public IDWriteTextAnalysisSource {
+        const wchar_t* text = L"A\u4E2D";
+    public:
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+            *object = nullptr;
+            if (iid != IID_IUnknown && iid != __uuidof(IDWriteTextAnalysisSource)) return E_NOINTERFACE;
+            *object = this;
+            AddRef();
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE GetTextAtPosition(UINT32 pos, const wchar_t** out, UINT32* len) override {
+            *out = pos < 2 ? text + pos : nullptr;
+            *len = pos < 2 ? 2 - pos : 0;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE GetTextBeforePosition(UINT32 pos, const wchar_t** out, UINT32* len) override {
+            *out = pos > 0 && pos <= 2 ? text : nullptr;
+            *len = *out ? pos : 0;
+            return S_OK;
+        }
+        DWRITE_READING_DIRECTION STDMETHODCALLTYPE GetParagraphReadingDirection() override {
+            return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT;
+        }
+        HRESULT STDMETHODCALLTYPE GetLocaleName(UINT32 pos, UINT32* len, const wchar_t** locale) override {
+            *locale = L"en-US";
+            *len = pos < 2 ? 2 - pos : 0;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE GetNumberSubstitution(UINT32 pos, UINT32* len,
+                                                       IDWriteNumberSubstitution** sub) override {
+            *sub = nullptr;
+            *len = pos < 2 ? 2 - pos : 0;
+            return S_OK;
+        }
+    } source;
+    IDWriteTextFormat1* format1 = nullptr;
+    IDWriteFontFallback* fallback = nullptr;
+    if (FAILED(format->QueryInterface(IID_PPV_ARGS(&format1)))) return {};
+    format1->GetFontFallback(&fallback);
+    format1->Release();
+    if (!fallback) return {};
+    wchar_t base[64] = {};
+    format->GetFontFamilyName(base, ARRAYSIZE(base));
+    IDWriteFont* mapped = nullptr;
+    UINT32 length = 0;
+    float scale = 0.0f;
+    fallback->MapCharacters(&source, position, 1, fonts, base, format->GetFontWeight(),
+                            format->GetFontStyle(), format->GetFontStretch(), &length, &mapped, &scale);
+    fallback->Release();
+    std::wstring result;
+    if (mapped) {
+        IDWriteFontFamily* family = nullptr;
+        if (SUCCEEDED(mapped->GetFontFamily(&family))) {
+            IDWriteLocalizedStrings* names = nullptr;
+            if (SUCCEEDED(family->GetFamilyNames(&names))) {
+                wchar_t name[64] = {};
+                UINT32 index = 0;
+                BOOL found = FALSE;
+                names->FindLocaleName(L"en-us", &index, &found);
+                if (SUCCEEDED(names->GetString(found ? index : 0, name, ARRAYSIZE(name)))) result = name;
+                names->Release();
+            }
+            family->Release();
+        }
+        mapped->Release();
+    }
+    return result;
+}
+
+static void TestLocalization() {
+    GUID id;
+    wchar_t name[64] = {};
+    Check(SUCCEEDED(CoCreateGuid(&id)) && StringFromGUID2(id, name, 64), "create unique locale test key name");
+    const std::wstring keyPath = std::wstring(L"Software\\DynamicWallpapersLocaleTest-") + name;
+    HKEY key = nullptr;
+    Check(RegCreateKeyExW(HKEY_CURRENT_USER, keyPath.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
+                         KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS,
+          "create isolated locale test key");
+    const bool fallback = ReadInstallLanguage(key, true) && !ReadInstallLanguage(key, false);
+    const bool chinese = WriteInstallLanguage(key, true) == ERROR_SUCCESS && ReadInstallLanguage(key, false);
+    const bool english = WriteInstallLanguage(key, false) == ERROR_SUCCESS && !ReadInstallLanguage(key, true);
+    RegCloseKey(key);
+    RegDeleteKeyW(HKEY_CURRENT_USER, keyPath.c_str());
+    Check(fallback, "missing install language follows Windows");
+    Check(chinese, "Chinese choice survives registry handoff on an English system");
+    Check(english, "English choice survives registry handoff on a Chinese system");
+
+    g_appChinese = chinese;
+    g_app.gfx.setTextLocale(g_appChinese);
+    Check(std::wstring(AppText(L"Themes", L"主题")) == L"主题" && FormatDuration(65) == L"1 小时 5 分钟",
+          "main window and core strings use the same language");
+    auto* zh = g_app.gfx.format(FONT_UI, 14.0f);
+    auto* en = g_app.gfx.format(FONT_UI, 14.0f, DWRITE_FONT_WEIGHT_NORMAL,
+                               DWRITE_TEXT_ALIGNMENT_LEADING, false, L"en-US");
+    wchar_t zhLocale[16] = {}, enLocale[16] = {};
+    Check(zh && en && zh != en && SUCCEEDED(zh->GetLocaleName(zhLocale, 16)) &&
+          SUCCEEDED(en->GetLocaleName(enLocale, 16)) && lstrcmpiW(zhLocale, L"zh-CN") == 0 &&
+          lstrcmpiW(enLocale, L"en-US") == 0, "font cache separates Chinese and English layouts");
+    auto* fallbackFace = g_app.gfx.format(L"DynamicWallpapersMissingTestFont,Segoe UI", 14.0f);
+    wchar_t family[64] = {};
+    Check(fallbackFace && SUCCEEDED(fallbackFace->GetFontFamilyName(family, 64)) &&
+          lstrcmpiW(family, L"Segoe UI") == 0, "missing fonts skip to a real installed family");
+    for (auto* format : {zh, en}) {
+        Check(SUCCEEDED(format->GetFontFamilyName(family, ARRAYSIZE(family))) &&
+              lstrcmpiW(family, L"Segoe UI") == 0, "both UI languages retain the system Latin font");
+        IDWriteFontCollection* fonts = nullptr;
+        Check(SUCCEEDED(format->GetFontCollection(&fonts)), "read system fonts for locale test");
+        UINT32 index = 0;
+        BOOL hasNSimSun = FALSE;
+        fonts->FindFamilyName(L"NSimSun", &index, &hasNSimSun);
+        if (hasNSimSun) {
+            Check(MappedUiFont(format, fonts, 0) == L"Segoe UI" &&
+                  MappedUiFont(format, fonts, 1) == L"NSimSun", "mixed text maps Latin and Han separately");
+        }
+        fonts->Release();
+    }
+    g_appChinese = false;
+    g_app.gfx.setTextLocale(false);
+    std::puts("PASS: installer/app locale handoff, localized text and DirectWrite font selection");
+}
+
 static std::wstring MakeBitmap(const wchar_t* name, LONG width, LONG height) {
     std::wstring path = JoinPath(ExeDir(), name);
     BITMAPFILEHEADER file = {};
@@ -586,7 +711,28 @@ static void TestThumbnails() {
     std::puts("PASS: WIC decoding, missing images, cancellation, scrolling, UI upload, shutdown");
 }
 
-int wmain() {
+static void TestShellIdentity() {
+    const std::wstring exe = ExePath();
+    const std::wstring icon = JoinPath(ExeDir(), kShellIconFile) + L",0";
+    SetShellWindowRelaunch(g_app.hwnd, exe, icon, L" --show", IDS_SHELL_TITLE, kShellAppId);
+    IPropertyStore* store = nullptr;
+    Check(SUCCEEDED(SHGetPropertyStoreForWindow(g_app.hwnd, IID_IPropertyStore, (void**)&store)),
+          "read the window's Windows Shell properties");
+    auto expect = [&](REFPROPERTYKEY key, const std::wstring& expected, const char* message) {
+        PROPVARIANT value = {};
+        Check(SUCCEEDED(store->GetValue(key, &value)) && value.vt == VT_LPWSTR &&
+              value.pwszVal && expected == value.pwszVal, message);
+        PropVariantClear(&value);
+    };
+    expect(PKEY_AppUserModel_ID, kShellAppId, "window uses the app's explicit Shell identity");
+    expect(PKEY_AppUserModel_RelaunchIconResource, icon, "Shell uses a versioned icon path");
+    expect(PKEY_AppUserModel_RelaunchCommand, L"\"" + exe + L"\" --show", "Shell relaunch opens the window");
+    expect(PKEY_AppUserModel_RelaunchDisplayNameResource, L"@" + exe + L",-" + std::to_wstring(IDS_SHELL_TITLE),
+           "Shell relaunch uses the embedded app title");
+    store->Release();
+}
+
+int wmain(int argc, wchar_t** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     Check(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "initialize COM");
     WNDCLASSW wc = {};
@@ -597,6 +743,25 @@ int wmain() {
         L"Dynamic Wallpapers isolated tests", kMainWindowStyle, 0, 0, 700, 764,
         nullptr, nullptr, wc.hInstance, nullptr);
     Check(g_app.hwnd != nullptr, "create hidden isolated test window");
+    if (argc > 1 && lstrcmpW(argv[1], L"--preview-localization") == 0) {
+        g_appChinese = argc > 2 ? ResolveInstallLanguage(argv[2], WindowsPrefersChinese())
+                                : InstalledLanguageIsChinese();
+        g_app.gfx.setTextLocale(g_appChinese);
+        g_app.cfg.autoSwitch = false;
+        g_app.cfg.noTheme = true;
+        g_app.cfg.minimizeToTray = false;
+        g_app.solidBg = true;
+        Check(EnsureUiInitialized(), "initialize localization preview");
+        ShowWindow(g_app.hwnd, SW_SHOW);
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        g_app.gfx.shutdown();
+        CoUninitialize();
+        return 0;
+    }
     TestWallpaperState();
     TestWallpaperTracker();
     TestDelayedWallpaper();
@@ -604,8 +769,10 @@ int wmain() {
     TestNestedThemeSelection();
     TestFollowAppMode();
     TestLazyGraphicsAndDpi();
+    TestLocalization();
     TestNativeMinimize();
     TestThumbnails();
+    TestShellIdentity();
     DestroyWindow(g_app.hwnd);
     g_app.gfx.shutdown();
     CoUninitialize();

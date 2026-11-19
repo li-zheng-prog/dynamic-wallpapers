@@ -2,6 +2,7 @@
 // core.cpp - Core application logic.
 // ============================================================================
 #include "core.h"
+#include "install_locale.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -454,12 +455,12 @@ bool ImportTheme(const std::wstring& name, const std::wstring& dayImage,
         if (err) *err = why;
         return false;
     };
-    if (dayImage.empty() || nightImage.empty()) return fail(L"Select two images.");
+    if (dayImage.empty() || nightImage.empty()) return fail(AppText(L"Select two images.", L"请选择两张图片。"));
     // Use the rename validation rules so paths such as "..\..\x" cannot escape the theme root.
     std::wstring nameErr;
     if (!ThemeNameValid(name, nameErr)) return fail(nameErr);
     std::wstring root = UserThemeDir();
-    if (root.empty()) return fail(L"The themes directory is unavailable.");
+    if (root.empty()) return fail(AppText(L"The themes directory is unavailable.", L"主题目录不可用。"));
     EnsureDir(root);
 
     // Append a suffix on conflicts; ThemeNameTaken checks every theme directory.
@@ -468,19 +469,19 @@ bool ImportTheme(const std::wstring& name, const std::wstring& dayImage,
         wchar_t suffix[16];
         swprintf(suffix, 16, L" (%d)", i);
         finalName = name + suffix;
-        if (i > 99) return fail(L"Too many themes share this name. Choose another name.");
+        if (i > 99) return fail(AppText(L"Too many themes share this name. Choose another name.", L"同名主题过多，请试用其他名称。"));
     }
     std::wstring target = JoinPath(root, finalName);
     if (!CreateDirectoryW(target.c_str(), nullptr))
-        return fail(L"Cannot create a theme folder in the app directory or %APPDATA%.");
+        return fail(AppText(L"Cannot create a theme folder in the app directory or %APPDATA%.", L"无法在应用目录或 %APPDATA% 中创建主题文件夹。"));
 
     // Copy both images with .jpg suffixes; decoding still recognizes the actual image format.
     auto copyAs = [&](const std::wstring& src, int index) -> bool {
         std::wstring dst = JoinPath(target, finalName + L"_" + std::to_wstring(index) + L".jpg");
         return CopyFileW(src.c_str(), dst.c_str(), FALSE) != FALSE;
     };
-    if (!copyAs(dayImage, 1)) return fail(L"Cannot copy the light image. It may have been moved or deleted.");
-    if (!copyAs(nightImage, 2)) return fail(L"Cannot copy the dark image. It may have been moved or deleted.");
+    if (!copyAs(dayImage, 1)) return fail(AppText(L"Cannot copy the light image. It may have been moved or deleted.", L"无法复制浅色图片。文件可能已移动或删除。"));
+    if (!copyAs(nightImage, 2)) return fail(AppText(L"Cannot copy the dark image. It may have been moved or deleted.", L"无法复制深色图片。文件可能已移动或删除。"));
 
     // Write UTF-8 theme.json in WDD format: day=1, night=2.
     std::wstring json = L"{\r\n"
@@ -492,14 +493,14 @@ bool ImportTheme(const std::wstring& name, const std::wstring& dayImage,
     std::wstring jsonPath = JoinPath(target, L"theme.json");
     HANDLE h = CreateFileW(jsonPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return fail(L"Cannot write theme.json.");
+    if (h == INVALID_HANDLE_VALUE) return fail(AppText(L"Cannot write theme.json.", L"无法写入 theme.json。"));
     int n = WideCharToMultiByte(CP_UTF8, 0, json.c_str(), (int)json.size(), nullptr, 0, nullptr, nullptr);
     std::string utf8(n, 0);
     WideCharToMultiByte(CP_UTF8, 0, json.c_str(), (int)json.size(), &utf8[0], n, nullptr, nullptr);
     DWORD written = 0;
     BOOL ok = WriteFile(h, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
     CloseHandle(h);
-    if (!ok) return fail(L"Cannot write theme.json.");
+    if (!ok) return fail(AppText(L"Cannot write theme.json.", L"无法写入 theme.json。"));
 
     outName = finalName;
     return true;
@@ -510,22 +511,23 @@ bool ImportTheme(const std::wstring& name, const std::wstring& dayImage,
 // Image filenames stay unchanged; imageFilename is a wildcard pattern.
 // ---------------------------------------------------------------------------
 bool ThemeNameValid(const std::wstring& name, std::wstring& err) {
-    if (name.empty()) { err = L"Enter a name."; return false; }
-    if (name.size() > 60) { err = L"Use 60 characters or fewer."; return false; }
+    if (name.empty()) { err = AppText(L"Enter a name.", L"请输入名称。"); return false; }
+    if (name.size() > 60) { err = AppText(L"Use 60 characters or fewer.", L"名称不能超过 60 个字符。"); return false; }
     for (wchar_t c : name) {
         if (c < 32 || wcschr(L"\\/:*?\"<>|", c)) {
-            err = L"Names cannot contain \\ / : * ? \" < > | characters.";
+        err = AppText(L"Names cannot contain \\ / : * ? \" < > | characters.",
+                      L"名称不能含有 \\ / : * ? \" < > | 字符。");
             return false;
         }
     }
-    if (name == L"." || name == L"..") { err = L"This name is not allowed."; return false; }
+    if (name == L"." || name == L"..") { err = AppText(L"This name is not allowed.", L"不能使用此名称。"); return false; }
     return true;
 }
 
 bool ThemeNameAvailable(const std::wstring& name, const std::wstring& exceptFolder, std::wstring& err) {
     if (!ThemeNameValid(name, err)) return false;
     if (ThemeNameTaken(name, exceptFolder)) {
-        err = L"A theme with this name already exists. Choose another name.";
+        err = AppText(L"A theme with this name already exists. Choose another name.", L"已存在同名主题，请使用其他名称。");
         return false;
     }
     return true;
@@ -576,15 +578,15 @@ static void UpdateThemeJsonDisplayName(const std::wstring& folder, const std::ws
 }
 
 bool RenameTheme(const std::wstring& folder, const std::wstring& newName, std::wstring& err) {
-    if (folder.empty()) { err = L"The theme directory does not exist."; return false; }
+    if (folder.empty()) { err = AppText(L"The theme directory does not exist.", L"主题目录不存在。"); return false; }
     if (!ThemeNameAvailable(newName, folder, err)) return false;
     size_t sl = folder.find_last_of(L"\\/");
-    if (sl == std::wstring::npos) { err = L"The theme directory path is invalid."; return false; }
+    if (sl == std::wstring::npos) { err = AppText(L"The theme directory path is invalid.", L"主题目录路径无效。"); return false; }
     std::wstring parent = folder.substr(0, sl);
     std::wstring target = JoinPath(parent, newName);
     if (target == folder) return true;                       // Unchanged.
     if (!MoveFileExW(folder.c_str(), target.c_str(), 0)) {
-        err = L"Cannot rename the folder. It already exists or is in use. Close it in File Explorer and retry.";
+        err = AppText(L"Cannot rename the folder. It already exists or is in use. Close it in File Explorer and retry.", L"无法重命名文件夹。文件夹可能已存在或正在使用。请在文件资源管理器中关闭它，然后重试。");
         return false;
     }
     UpdateThemeJsonDisplayName(target, newName);
@@ -605,11 +607,11 @@ static bool SafeToDelete(const std::wstring& folder) {
 bool DeleteThemeFolder(const std::wstring& folder, std::wstring& outErr) {
     outErr.clear();
     if (folder.empty() || !DirExists(folder)) {
-        outErr = L"The theme folder no longer exists.";
+        outErr = AppText(L"The theme folder no longer exists.", L"主题文件夹已不存在。");
         return false;
     }
     if (!SafeToDelete(folder)) {
-        outErr = L"Deletion refused: unsafe path.";
+        outErr = AppText(L"Deletion refused: unsafe path.", L"未删除主题：路径不在允许的范围内。");
         return false;
     }
 
@@ -629,7 +631,7 @@ bool DeleteThemeFolder(const std::wstring& folder, std::wstring& outErr) {
     // without a recoverable Recycle Bin entry. Report the error so the user can retry.
     // IFileOperation itself handles drives without a Recycle Bin.
     if (!ok || DirExists(folder)) {
-        outErr = L"Cannot delete the theme. Files may be in use or access may be denied.";
+        outErr = AppText(L"Cannot delete the theme. Files may be in use or access may be denied.", L"无法删除主题。文件可能正在使用，或没有访问权限。");
         return false;
     }
     return true;
@@ -671,12 +673,12 @@ std::wstring FormatHM(int minutes) {
 }
 
 std::wstring FormatDuration(int minutes) {
-    if (minutes <= 0) return L"soon";
+    if (minutes <= 0) return AppText(L"soon", L"即将切换");
     int h = minutes / 60, m = minutes % 60;
     wchar_t buf[64];
-    if (h > 0 && m > 0) swprintf(buf, 64, L"%d hr %d min", h, m);
-    else if (h > 0)     swprintf(buf, 64, L"%d hr", h);
-    else                swprintf(buf, 64, L"%d min", m);
+    if (h > 0 && m > 0) swprintf(buf, 64, AppText(L"%d hr %d min", L"%d 小时 %d 分钟"), h, m);
+    else if (h > 0)     swprintf(buf, 64, AppText(L"%d hr", L"%d 小时"), h);
+    else                swprintf(buf, 64, AppText(L"%d min", L"%d 分钟"), m);
     return buf;
 }
 

@@ -30,20 +30,22 @@ custom interface inspired by WinUI 3.
 
 ## Download and install
 
-Download the installer from [Releases](../../releases). The portable executable
-and example theme archive are available directly from this repository:
+Download the installer, portable executable, or example theme archive from
+[Releases](../../releases):
 
 | File | Use |
 | --- | --- |
 | [DynamicWallpapersSetup.exe](https://github.com/li-zheng-prog/dynamic-wallpapers/releases/latest/download/DynamicWallpapersSetup.exe) | Install the app with an example theme and a Windows uninstall entry. |
-| [DynamicWallpapers-portable.exe](dist/DynamicWallpapers-portable.exe?raw=true) | Run the app without installation. |
-| [themes.zip](dist/themes.zip?raw=true) | Add the example theme to the portable app. |
+| [DynamicWallpapers-portable.exe](https://github.com/li-zheng-prog/dynamic-wallpapers/releases/latest/download/DynamicWallpapers-portable.exe) | Run the app without installation. |
+| [themes.zip](https://github.com/li-zheng-prog/dynamic-wallpapers/releases/latest/download/themes.zip) | Add the example theme to the portable app. |
 
 ### Installer
 
-Run `DynamicWallpapersSetup.exe` and choose the installation options. The default
-installation directory is `%LOCALAPPDATA%\Programs\Dynamic Wallpapers`; administrator
-rights are not required. You can uninstall the app from Windows Settings.
+Run `DynamicWallpapersSetup.exe` and choose **简体中文** (Simplified Chinese) or
+**English**. Setup initially selects a language based on the Windows display
+language and uses the selected language for setup, the installed app, and the uninstaller.
+The default installation directory is `%LOCALAPPDATA%\Programs\Dynamic Wallpapers`;
+administrator rights are not required. You can uninstall the app from Windows Settings.
 
 ### Portable app
 
@@ -209,6 +211,12 @@ dist/
 ├── DynamicWallpapersSetup.exe
 └── themes/
 ```
+
+The app, installer, and Windows shortcuts share artwork generated from
+`logo.png`. Its alpha channel defines the One UI-style outline; the build
+preserves that silhouette at each icon size. When replacing the artwork, bump
+the installed icon filename in `src/shell_identity.h` and `build/build.sh` so
+Windows loads the new version instead of reusing a cached icon.
 
 The installer embeds the application and repository themes. The installer,
 portable executable, and `themes.zip` are tracked in Git under `dist/`.

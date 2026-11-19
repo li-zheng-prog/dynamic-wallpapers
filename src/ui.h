@@ -9,8 +9,8 @@
 #include "gfx.h"
 #include <string>
 
-// Font fallback families, tried in comma-separated order.
-#define FONT_UI      L"Segoe UI Variable Text,Segoe UI,Microsoft YaHei UI"
+// A null family selects system UI typography in Gfx.
+#define FONT_UI      nullptr
 #define FONT_ICON    L"Segoe MDL2 Assets"
 
 // Dimensions in DIPs.
@@ -90,6 +90,6 @@ void UiTextButton(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const
 // pressScale: scale around the indicator center, 1.0 at rest.
 void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& items,
                  int selected, int hotSeg, const Palette& p, float anim = -1.0f,
-                 float pressScale = 1.0f);
+                 float pressScale = 1.0f, const wchar_t* const* locales = nullptr);
 // Dim the entire window behind a modal dialog.
 void UiDim(Gfx& g, float w, float h, const Palette& p);

@@ -476,7 +476,8 @@ static float OverlapX(const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
 }
 
 void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& items,
-                 int selected, int hotSeg, const Palette& p, float anim, float pressScale) {
+                 int selected, int hotSeg, const Palette& p, float anim, float pressScale,
+                 const wchar_t* const* locales) {
     if (items.empty()) return;
     const int n = (int)items.size();
     if (anim < 0.0f) anim = (float)selected;              // Without anim, keep the indicator at the selected segment.
@@ -525,7 +526,7 @@ void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& 
         IDWriteTextFormat* f = g.format(FONT_UI, 12.5f,
                                         i == selected ? DWRITE_FONT_WEIGHT_SEMI_BOLD
                                                       : DWRITE_FONT_WEIGHT_NORMAL,
-                                        DWRITE_TEXT_ALIGNMENT_CENTER);
+                                        DWRITE_TEXT_ALIGNMENT_CENTER, false, locales ? locales[i] : nullptr);
         g.textOptical(items[i], f, seg, tc, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 }

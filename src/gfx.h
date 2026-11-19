@@ -11,7 +11,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d2d1_1.h>
-#include <dwrite.h>
+#include <dwrite_2.h>
 #include <d3d11.h>
 #include <dcomp.h>
 #include <string>
@@ -41,12 +41,13 @@ public:
 
     // Cache brushes and text formats instead of recreating them each frame.
     ID2D1SolidColorBrush* brush(const D2D1_COLOR_F& color);
-    // Try comma-separated font families in order.
+    // Null selects the UI font and its CJK fallback; explicit families are tried in order.
     // Control text uses NEAR paragraph alignment and textOptical for ink-based centering.
     IDWriteTextFormat* format(const wchar_t* families, float dipSize,
                               DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL,
                               DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING,
-                              bool wrap = false);
+                              bool wrap = false, const wchar_t* locale = nullptr);
+    void setTextLocale(bool chinese) { chineseText_ = chinese; }
     // Decode JPG/PNG/BMP; use WIC scaling when maxWidthPx>0 to save memory.
     ID2D1Bitmap* loadImage(const std::wstring& path, UINT maxWidthPx);
     // Decode executable RCDATA resources so the logo needs no external file.
@@ -88,9 +89,11 @@ private:
     IDCompositionTarget* dcompTarget_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;
     IDWriteFactory* dwrite_ = nullptr;
+    IDWriteFontFallback* uiFontFallback_ = nullptr;
+    bool chineseText_ = false;
     IWICImagingFactory* wic_ = nullptr;
 
     std::vector<std::pair<D2D1_COLOR_F, ID2D1SolidColorBrush*>> brushes_;
-    struct FmtKey { std::wstring fam; float size; int weight; int align; bool wrap; };
+    struct FmtKey { std::wstring fam, locale; float size; int weight; int align; bool wrap; };
     std::vector<std::pair<FmtKey, IDWriteTextFormat*>> formats_;
 };
