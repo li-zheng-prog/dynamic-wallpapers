@@ -1863,7 +1863,7 @@ static void RenderFrame() {
 
     // Bottom action; settings apply automatically, while Apply now is available in the tray menu.
     UiButton(g, g_app.L.openThemesBtn, AppText(L"Open themes folder", L"打开主题文件夹"), p, false,
-             g_app.hot == CID_OPENTHEMES, g_app.pressed == CID_OPENTHEMES, true, L"\uE838");
+             g_app.hot == CID_OPENTHEMES, g_app.pressed == CID_OPENTHEMES, true);
 
     g.dc()->SetTransform(D2D1::Matrix3x2F::Identity());
     g.dc()->PopAxisAlignedClip();
