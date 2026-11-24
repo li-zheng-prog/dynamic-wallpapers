@@ -119,8 +119,8 @@ std::vector<std::wstring> ThemeDirs() {
 // INI settings; the Windows API handles UTF-16.
 // ---------------------------------------------------------------------------
 static std::wstring ReadIniRaw(const wchar_t* section, const wchar_t* key) {
-    wchar_t buf[512] = {0};
-    GetPrivateProfileStringW(section, key, L"", buf, 512, ConfigPath().c_str());
+    wchar_t buf[2048] = {0};
+    GetPrivateProfileStringW(section, key, L"", buf, ARRAYSIZE(buf), ConfigPath().c_str());
     return buf;
 }
 
@@ -159,6 +159,9 @@ Config LoadConfig() {
     c.wallpaperStyle = GetInt(L"WallpaperStyle", 4);
     c.appearance   = GetInt(L"Appearance", 0);
     if (c.appearance < 0 || c.appearance > 2) c.appearance = 0;
+    c.language = ParseAppLanguage(GetStr(L"Language", L"system"));
+    c.chineseFont = DecodeFontPreference(GetStr(L"ChineseFont", L""));
+    c.englishFont = DecodeFontPreference(GetStr(L"EnglishFont", L""));
     // Keep times distinct and within 0..1439 minutes.
     auto clamp = [](int v) { return v < 0 ? 0 : (v > 1439 ? 1439 : v); };
     c.dayStart = clamp(c.dayStart);
@@ -179,6 +182,9 @@ void SaveConfig(const Config& c) {
     PutInt(L"MinimizeToTray", c.minimizeToTray ? 1 : 0);
     PutInt(L"WallpaperStyle", c.wallpaperStyle);
     PutInt(L"Appearance", c.appearance);
+    PutStr(L"Language", AppLanguageTag(c.language));
+    PutStr(L"ChineseFont", EncodeFontPreference(c.chineseFont));
+    PutStr(L"EnglishFont", EncodeFontPreference(c.englishFont));
     // Remove [TimeWall] after writing all values to the current section.
     WritePrivateProfileStringW(kLegacyIniSection, nullptr, nullptr, ConfigPath().c_str());
 }

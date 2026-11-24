@@ -535,3 +535,37 @@ void UiDim(Gfx& g, float w, float h, const Palette& p) {
     ID2D1SolidColorBrush* b = g.brush(Col(0, 0, 0, p.dark ? 0.45f : 0.28f));
     if (b) g.dc()->FillRectangle(D2D1::RectF(0, 0, w, h), b);
 }
+void UiComboBox(Gfx& g, const D2D1_RECT_F& r, const std::wstring& value, const Palette& p,
+                bool hovered, bool pressed, bool focused, bool open) {
+    auto box = D2D1::RoundedRect(r, Ui::RadiusControl, Ui::RadiusControl);
+    g.fillRound(box, pressed ? p.ctrlFillPressed : (hovered || open ? p.ctrlFillHover : p.ctrlFill));
+    g.strokeRound(box, focused || open ? p.accent : p.ctrlStrokeHover);
+    auto* text = g.format(FONT_UI, 13.5f);
+    g.textOptical(value, text, D2D1::RectF(r.left + 12, r.top, r.right - 34, r.bottom),
+                  p.textPrimary, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    g.textOptical(open ? L"\uE70E" : L"\uE70D", g.format(FONT_ICON, 11.0f),
+                  D2D1::RectF(r.right - 30, r.top, r.right - 6, r.bottom),
+                  p.textSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
+}
+
+void UiComboPopup(Gfx& g, const D2D1_RECT_F& r, const Palette& p) {
+    g.fillRound(D2D1::RoundedRect(D2D1::RectF(r.left - 2, r.top, r.right + 2, r.bottom + 4),
+                                Ui::RadiusCard, Ui::RadiusCard), p.shadowTint);
+    auto box = D2D1::RoundedRect(r, Ui::RadiusCard, Ui::RadiusCard);
+    g.fillRound(box, p.dark ? ColHex(0x2C2C2C) : ColHex(0xFCFCFC));
+    g.strokeRound(box, p.ctrlStrokeHover);
+}
+
+void UiComboItem(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const Palette& p,
+                 bool selected, bool highlighted) {
+    if (selected || highlighted)
+        g.fillRound(D2D1::RoundedRect(D2D1::RectF(r.left, r.top + 1, r.right, r.bottom - 1),
+                                    Ui::RadiusControl, Ui::RadiusControl),
+                    highlighted ? p.captionHover : p.ctrlFill);
+    if (selected)
+        g.fillRound(D2D1::RoundedRect(D2D1::RectF(r.left + 2, r.top + 8, r.left + 5, r.bottom - 8),
+                                    1.5f, 1.5f), p.accent);
+    g.textOptical(label, g.format(FONT_UI, 13.5f),
+                  D2D1::RectF(r.left + 12, r.top, r.right - 8, r.bottom), p.textPrimary,
+                  DWRITE_TEXT_ALIGNMENT_LEADING, true);
+}

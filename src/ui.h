@@ -91,5 +91,10 @@ void UiTextButton(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const
 void UiSegmented(Gfx& g, const D2D1_RECT_F& r, const std::vector<std::wstring>& items,
                  int selected, int hotSeg, const Palette& p, float anim = -1.0f,
                  float pressScale = 1.0f, const wchar_t* const* locales = nullptr);
+void UiComboBox(Gfx& g, const D2D1_RECT_F& r, const std::wstring& value, const Palette& p,
+                bool hovered, bool pressed, bool focused, bool open);
+void UiComboPopup(Gfx& g, const D2D1_RECT_F& r, const Palette& p);
+void UiComboItem(Gfx& g, const D2D1_RECT_F& r, const std::wstring& label, const Palette& p,
+                 bool selected, bool highlighted);
 // Dim the entire window behind a modal dialog.
 void UiDim(Gfx& g, float w, float h, const Palette& p);

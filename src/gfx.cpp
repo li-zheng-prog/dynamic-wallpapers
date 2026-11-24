@@ -19,36 +19,73 @@ static bool ColorEq(const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
     return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
 }
 
-static IDWriteFontFallback* CreateUiFontFallback(IDWriteFactory* factory) {
-    IDWriteFontCollection* fonts = nullptr;
-    if (FAILED(factory->GetSystemFontCollection(&fonts))) return nullptr;
-    const wchar_t* families[] = {L"NSimSun"};
+static bool FontExists(IDWriteFontCollection* fonts, const std::wstring& name) {
     UINT32 index = 0;
-    BOOL installed = FALSE;
-    const HRESULT lookup = fonts->FindFamilyName(families[0], &index, &installed);
-    fonts->Release();
-    if (FAILED(lookup) || !installed) return nullptr;
+    BOOL exists = FALSE;
+    return fonts && !name.empty() && SUCCEEDED(fonts->FindFamilyName(name.c_str(), &index, &exists)) && exists;
+}
 
-    IDWriteFactory2* factory2 = nullptr;
-    if (FAILED(factory->QueryInterface(IID_PPV_ARGS(&factory2)))) return nullptr;
-    IDWriteFontFallbackBuilder* builder = nullptr;
-    IDWriteFontFallback* systemFallback = nullptr;
-    IDWriteFontFallback* result = nullptr;
-    const DWRITE_UNICODE_RANGE ranges[] = {
-        {0x2E80, 0x2FDF}, {0x3000, 0x303F}, {0x31C0, 0x31EF},
-        {0x3400, 0x4DBF}, {0x4E00, 0x9FFF}, {0xF900, 0xFAFF},
-        {0xFE30, 0xFE4F}, {0xFF01, 0xFF60}, {0xFFE0, 0xFFE6}, {0x20000, 0x2FA1F},
-    };
-    // Prefer NSimSun for CJK fallback glyphs, then retain the system's full fallback chain.
-    if (SUCCEEDED(factory2->GetSystemFontFallback(&systemFallback)) &&
-        SUCCEEDED(factory2->CreateFontFallbackBuilder(&builder)) &&
-        SUCCEEDED(builder->AddMapping(ranges, ARRAYSIZE(ranges), families, ARRAYSIZE(families),
-                                      nullptr, nullptr, nullptr, 1.0f)) &&
-        SUCCEEDED(builder->AddMappings(systemFallback)))
-        builder->CreateFontFallback(&result);
-    if (builder) builder->Release();
-    if (systemFallback) systemFallback->Release();
-    factory2->Release();
+void Gfx::resolveUiFonts() {
+    activeChineseFont_ = FontExists(fonts_, chineseFont_) ? chineseFont_ : L"";
+    activeEnglishFont_ = FontExists(fonts_, englishFont_) ? englishFont_ : L"";
+}
+
+void Gfx::setUiFonts(const std::wstring& chinese, const std::wstring& english) {
+    chineseFont_ = chinese;
+    englishFont_ = english;
+    resolveUiFonts();
+}
+
+void Gfx::refreshFonts() {
+    if (!dwrite_) return;
+    IDWriteFontCollection* updated = nullptr;
+    if (FAILED(dwrite_->GetSystemFontCollection(&updated, TRUE))) return;
+    for (auto& f : formats_) f.second->Release();
+    formats_.clear();
+    if (ellipsis_) { ellipsis_->Release(); ellipsis_ = nullptr; }
+    if (fonts_) fonts_->Release();
+    fonts_ = updated;
+    NONCLIENTMETRICSW metrics = {sizeof(metrics)};
+    systemUiFont_ = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0) &&
+                    FontExists(fonts_, metrics.lfMessageFont.lfFaceName)
+                    ? metrics.lfMessageFont.lfFaceName : L"Segoe UI";
+    resolveUiFonts();
+}
+
+static std::wstring FamilyName(IDWriteLocalizedStrings* names, const wchar_t* locale, UINT32 fallback) {
+    UINT32 index = 0, length = 0;
+    BOOL found = FALSE;
+    if (FAILED(names->FindLocaleName(locale, &index, &found)) || !found) index = fallback;
+    if (FAILED(names->GetStringLength(index, &length))) return {};
+    std::wstring result(length + 1, L'\0');
+    if (FAILED(names->GetString(index, result.data(), length + 1))) return {};
+    result.resize(length);
+    return result;
+}
+
+std::vector<FontFamilyOption> Gfx::installedFonts() const {
+    std::vector<FontFamilyOption> result;
+    if (!fonts_) return result;
+    const wchar_t* locale = chineseText_ ? L"zh-CN" : L"en-US";
+    for (UINT32 i = 0; i < fonts_->GetFontFamilyCount(); ++i) {
+        IDWriteFontFamily* family = nullptr;
+        if (FAILED(fonts_->GetFontFamily(i, &family))) continue;
+        IDWriteLocalizedStrings* names = nullptr;
+        if (SUCCEEDED(family->GetFamilyNames(&names))) {
+            auto name = FamilyName(names, L"en-US", 0);
+            UINT32 english = 0;
+            BOOL found = FALSE;
+            if (FAILED(names->FindLocaleName(L"en-US", &english, &found)) || !found) english = 0;
+            auto label = FamilyName(names, locale, english);
+            if (!name.empty()) result.push_back({name, label.empty() ? name : label});
+            names->Release();
+        }
+        family->Release();
+    }
+    std::stable_sort(result.begin(), result.end(), [locale](const auto& a, const auto& b) {
+        return CompareStringEx(locale, NORM_IGNORECASE, a.label.c_str(), -1, b.label.c_str(), -1,
+                               nullptr, nullptr, 0) == CSTR_LESS_THAN;
+    });
     return result;
 }
 
@@ -94,7 +131,7 @@ bool Gfx::init(HWND hwnd) {
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                                    (IUnknown**)&dwrite_)))
         return bail();
-    uiFontFallback_ = CreateUiFontFallback(dwrite_);
+    refreshFonts();
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                      __uuidof(IWICImagingFactory), (void**)&wic_);
 
@@ -207,7 +244,8 @@ void Gfx::shutdown() {
     if (dcompTarget_) { dcompTarget_->Release(); dcompTarget_ = nullptr; }
     if (dcomp_) { dcomp_->Release(); dcomp_ = nullptr; }
     if (wic_) { wic_->Release(); wic_ = nullptr; }
-    if (uiFontFallback_) { uiFontFallback_->Release(); uiFontFallback_ = nullptr; }
+    if (ellipsis_) { ellipsis_->Release(); ellipsis_ = nullptr; }
+    if (fonts_) { fonts_->Release(); fonts_ = nullptr; }
     if (dwrite_) { dwrite_->Release(); dwrite_ = nullptr; }
     if (dc_) { dc_->Release(); dc_ = nullptr; }
     if (d2dDevice_) { d2dDevice_->Release(); d2dDevice_ = nullptr; }
@@ -262,36 +300,23 @@ IDWriteTextFormat* Gfx::format(const wchar_t* families, float dipSize,
             return f.second;
 
     // CreateTextFormat can succeed for a missing family; check the collection before choosing.
-    IDWriteFontCollection* fonts = nullptr;
-    dwrite_->GetSystemFontCollection(&fonts);
-    const std::wstring list = families ? families : L"Segoe UI";
+    const std::wstring list = families ? families : systemUiFont_;
     IDWriteTextFormat* fmt = nullptr;
     size_t start = 0;
     auto create = [&](const wchar_t* family) {
-        return dwrite_->CreateTextFormat(family, fonts, weight, DWRITE_FONT_STYLE_NORMAL,
+        return dwrite_->CreateTextFormat(family, fonts_, weight, DWRITE_FONT_STYLE_NORMAL,
                                         DWRITE_FONT_STRETCH_NORMAL, dipSize, locale, &fmt);
     };
     while (true) {
         size_t comma = list.find(L',', start);
         std::wstring one = list.substr(start, comma == std::wstring::npos ? comma : comma - start);
-        UINT32 index = 0;
-        BOOL exists = FALSE;
-        if (fonts && SUCCEEDED(fonts->FindFamilyName(one.c_str(), &index, &exists)) && exists &&
-            SUCCEEDED(create(one.c_str())))
+        if (FontExists(fonts_, one) && SUCCEEDED(create(one.c_str())))
             break;
         if (comma == std::wstring::npos) break;
         start = comma + 1;
     }
     if (!fmt) create(L"Segoe UI");
-    if (fonts) fonts->Release();
     if (!fmt) return nullptr;
-    if (!families && uiFontFallback_) {
-        IDWriteTextFormat1* format1 = nullptr;
-        if (SUCCEEDED(fmt->QueryInterface(IID_PPV_ARGS(&format1)))) {
-            format1->SetFontFallback(uiFontFallback_);
-            format1->Release();
-        }
-    }
     fmt->SetTextAlignment(align);
     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     fmt->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -393,20 +418,64 @@ void Gfx::strokeRound(const D2D1_ROUNDED_RECT& r, const D2D1_COLOR_F& c, float w
     if (b) dc_->DrawRoundedRectangle(r, b, w);
 }
 
+// Punctuation used specifically with Chinese belongs to the same run as Han text.
+static int UiScript(UINT32 c) {
+    if ((c >= 0x2E80 && c <= 0x2FDF) || (c >= 0x3000 && c <= 0x303F) ||
+        (c >= 0x31C0 && c <= 0x31EF) || (c >= 0x3400 && c <= 0x4DBF) ||
+        (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF) ||
+        (c >= 0xFE10 && c <= 0xFE4F) || (c >= 0xFF01 && c <= 0xFF60) ||
+        (c >= 0xFFE0 && c <= 0xFFE6) || (c >= 0x20000 && c <= 0x2FA1F) ||
+        (c >= 0x30000 && c <= 0x323AF)) return 1;
+    if ((c >= 0x20 && c <= 0x7E) || (c >= 0xC0 && c <= 0x24F) ||
+        (c >= 0x1E00 && c <= 0x1EFF)) return 2;
+    return 0;
+}
+
+IDWriteTextLayout* Gfx::textLayout(const std::wstring& s, IDWriteTextFormat* fmt, float w, float h) {
+    IDWriteTextLayout* layout = nullptr;
+    if (!dwrite_ || !fmt || FAILED(dwrite_->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, w, h, &layout)))
+        return nullptr;
+    const auto f = std::find_if(formats_.begin(), formats_.end(), [fmt](const auto& item) { return item.second == fmt; });
+    if (f == formats_.end() || !f->first.fam.empty()) return layout;
+
+    UINT32 start = 0;
+    int script = 0;
+    auto setRun = [&](UINT32 end) {
+        if (end == start || script == 0) return;
+        DWRITE_TEXT_RANGE range = {start, end - start};
+        const auto& font = script == 1 ? activeChineseFont_ : activeEnglishFont_;
+        if (!font.empty()) layout->SetFontFamilyName(font.c_str(), range);
+        if (script == 1) layout->SetLocaleName(L"zh-CN", range);
+    };
+    for (UINT32 i = 0; i < s.size();) {
+        const UINT32 at = i;
+        UINT32 c = s[i++];
+        if (c >= 0xD800 && c <= 0xDBFF && i < s.size() && s[i] >= 0xDC00 && s[i] <= 0xDFFF)
+            c = 0x10000 + ((c - 0xD800) << 10) + (s[i++] - 0xDC00);
+        // Keep combining marks and variation selectors with their base glyph.
+        const int next = ((c >= 0x300 && c <= 0x36F) || (c >= 0xFE00 && c <= 0xFE0F) ||
+                          (c >= 0xE0100 && c <= 0xE01EF)) ? script : UiScript(c);
+        if (next != script) { setRun(at); start = at; script = next; }
+    }
+    setRun((UINT32)s.size());
+    return layout;
+}
+
 void Gfx::text(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
                const D2D1_COLOR_F& c) {
     if (!fmt || s.empty()) return;
     ID2D1SolidColorBrush* b = brush(c);
-    if (b) dc_->DrawTextW(s.c_str(), (UINT32)s.size(), fmt, r, b,
-                          D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    if (!b || r.right <= r.left || r.bottom <= r.top) return;
+    if (auto* layout = textLayout(s, fmt, r.right - r.left, r.bottom - r.top)) {
+        dc_->DrawTextLayout(D2D1::Point2F(r.left, r.top), layout, b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        layout->Release();
+    }
 }
 
 float Gfx::textWidth(const std::wstring& s, IDWriteTextFormat* fmt) {
     if (!fmt || s.empty()) return 0;
-    IDWriteTextLayout* layout = nullptr;
-    if (FAILED(dwrite_->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, 4000.0f, 100.0f,
-                                         &layout)))
-        return 0;
+    auto* layout = textLayout(s, fmt, 4000.0f, 100.0f);
+    if (!layout) return 0;
     layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     DWRITE_TEXT_METRICS tm = {};
@@ -420,16 +489,20 @@ float Gfx::textWidth(const std::wstring& s, IDWriteTextFormat* fmt) {
 // inkBottom = box height + om.bottom; a negative bottom overhang lies inside the box.
 // Adding tm.height instead can produce a large negative bound and move text offscreen.
 void Gfx::textOptical(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
-                      const D2D1_COLOR_F& c, DWRITE_TEXT_ALIGNMENT align) {
+                      const D2D1_COLOR_F& c, DWRITE_TEXT_ALIGNMENT align, bool ellipsis) {
     if (!fmt || s.empty()) return;
     ID2D1SolidColorBrush* b = brush(c);
     if (!b) return;
     float boxW = r.right - r.left;
     if (boxW <= 0) return;
     const float kBoxH = 1000.0f;
-    IDWriteTextLayout* layout = nullptr;
-    if (FAILED(dwrite_->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, boxW, kBoxH, &layout)))
-        return;
+    auto* layout = textLayout(s, fmt, boxW, kBoxH);
+    if (!layout) return;
+    if (ellipsis) {
+        if (!ellipsis_) dwrite_->CreateEllipsisTrimmingSign(fmt, &ellipsis_);
+        const DWRITE_TRIMMING trimming = {DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        layout->SetTrimming(&trimming, ellipsis_);
+    }
     layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     DWRITE_TEXT_METRICS tm = {};

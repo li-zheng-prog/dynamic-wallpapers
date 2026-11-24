@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+struct FontFamilyOption { std::wstring name, label; };
+
 class Gfx {
 public:
     // Create the D3D11 device, D2D context, swap chain, and DComp visual tree.
@@ -48,6 +50,9 @@ public:
                               DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING,
                               bool wrap = false, const wchar_t* locale = nullptr);
     void setTextLocale(bool chinese) { chineseText_ = chinese; }
+    void setUiFonts(const std::wstring& chinese, const std::wstring& english);
+    std::vector<FontFamilyOption> installedFonts() const;
+    void refreshFonts();
     // Decode JPG/PNG/BMP; use WIC scaling when maxWidthPx>0 to save memory.
     ID2D1Bitmap* loadImage(const std::wstring& path, UINT maxWidthPx);
     // Decode executable RCDATA resources so the logo needs no external file.
@@ -64,7 +69,9 @@ public:
     // make text appear too high. Used for labels inside controls.
     void textOptical(const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
                      const D2D1_COLOR_F& c,
-                     DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING);
+                     DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING, bool ellipsis = false);
+    // Caller releases the layout. Explicit font formats (e.g. icons) bypass UI font overrides.
+    IDWriteTextLayout* textLayout(const std::wstring& s, IDWriteTextFormat* fmt, float w, float h);
     // Measure ink width for positioning adjacent text blocks.
     float textWidth(const std::wstring& s, IDWriteTextFormat* fmt);
     // Clipping for rounded images and similar shapes.
@@ -73,6 +80,7 @@ public:
 
 private:
     bool createTargetFromSwapChain();
+    void resolveUiFonts();
 
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
@@ -89,7 +97,10 @@ private:
     IDCompositionTarget* dcompTarget_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;
     IDWriteFactory* dwrite_ = nullptr;
-    IDWriteFontFallback* uiFontFallback_ = nullptr;
+    IDWriteFontCollection* fonts_ = nullptr;
+    IDWriteInlineObject* ellipsis_ = nullptr;
+    std::wstring systemUiFont_ = L"Segoe UI";
+    std::wstring chineseFont_, englishFont_, activeChineseFont_, activeEnglishFont_;
     bool chineseText_ = false;
     IWICImagingFactory* wic_ = nullptr;
 

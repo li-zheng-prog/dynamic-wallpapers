@@ -12,6 +12,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "preferences.h"
 
 // A theme is a folder containing images and optional WDD-compatible theme.json.
 struct ThemeInfo {
@@ -39,6 +40,8 @@ struct Config {
     // Wallpaper position: 0=center, 1=tile, 2=stretch, 3=fit, 4=fill, 5=span; matches IDesktopWallpaper.
     int wallpaperStyle = 4;
     int appearance = 0;          // Appearance: 0=system, 1=light, 2=dark.
+    AppLanguage language = AppLanguage::System;
+    std::wstring chineseFont, englishFont; // Empty uses Windows UI typography.
 };
 
 // Paths.

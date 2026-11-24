@@ -23,7 +23,7 @@ custom interface inspired by WinUI 3.
 | Automatic switching | Set day and night start times, or follow the Windows app theme, including Custom color mode. |
 | Theme management | Browse a responsive card grid, create themes from two images, rename themes, and move unwanted themes to the Recycle Bin. |
 | Wallpaper positioning | Choose center, tile, stretch, fit, fill, or span across monitors. |
-| App appearance | Choose system, light, or dark appearance with the Windows accent color. |
+| App appearance | Choose system, light, or dark appearance, set the app language, and select Chinese and English fonts independently. |
 | Window effects | Use live system acrylic on supported Windows 11 versions, or a solid background on Windows 10. Custom wallpaper-based blur is also available. |
 | Background operation | Keep switching from the system tray and optionally start silently with Windows. |
 | Native integration | Native minimize and restore animations, support for system animation settings, and IME input for theme names. |
@@ -43,7 +43,8 @@ Download the installer, portable executable, or example theme archive from
 
 Run `DynamicWallpapersSetup.exe` and choose **简体中文** (Simplified Chinese) or
 **English**. Setup initially selects a language based on the Windows display
-language and uses the selected language for setup, the installed app, and the uninstaller.
+language and uses the selected language for setup and the uninstaller. The app's
+language setting is independent and follows the Windows display language by default.
 The default installation directory is `%LOCALAPPDATA%\Programs\Dynamic Wallpapers`;
 administrator rights are not required. You can uninstall the app from Windows Settings.
 
@@ -79,6 +80,12 @@ theme locations are described below.
 
 The app's **System / Light / Dark** appearance setting controls its interface
 separately from the wallpaper switching mode.
+
+Under **Appearance**, use the **System / Chinese / English** buttons to select
+the app language. Choose Windows typography or an installed font separately for
+Chinese and English, including in mixed text. Changes apply immediately and are
+saved for the next launch. The main window can be resized below its starting size;
+scroll to reach settings that do not fit.
 
 ### System tray
 

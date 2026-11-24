@@ -24,6 +24,7 @@
 #include <dwmapi.h>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <cmath>            // powf for zoom animation easing.
 // timeBeginPeriod(1) requests 1 ms timer precision; the default ~15.6 ms WM_TIMER tick
 // cannot provide smooth animation on 120 Hz displays. This does not improve GetTickCount64,
@@ -50,8 +51,8 @@ static constexpr DWORD kMainWindowStyle = WS_OVERLAPPEDWINDOW;
 static const wchar_t* kAppDisplay = L"Dynamic Wallpapers";
 static const wchar_t* kLegacyDisplay = L"\u58c1\u7eb8\u968f\u65f6\u95f4\u53d8\u5316";   // Exact legacy shortcut/Start menu name, retained only for migration.
 static const float kWinW = 700.0f;      // Default window width in DIPs.
-static const float kWinH = 788.0f;      // Default height in DIPs; must match ComputeLayout's natural content height.
-                                        // Update this when adding or removing sections to avoid clipping the bottom.
+static const float kWinH = 788.0f;      // Initial height; taller content uses the page scrollbar.
+static constexpr float kMinWinW = 588.0f, kMinWinH = 490.0f; // Leave room for the largest modal.
 static const float kPadX = 24.0f;
 static const float kCardW = 152.0f;     // Theme card dimensions in DIPs.
 static const float kCardH = 148.0f;
@@ -78,6 +79,7 @@ enum CtrlId {
     CID_OV_CANCEL = 70, CID_OV_OK, CID_OV_NAME = 76, CID_OV_LIGHT_SLOT, CID_OV_DARK_SLOT,
     CID_DLG_CANCEL = 80, CID_DLG_OK,
     CID_REN_CANCEL = 83, CID_REN_OK, CID_REN_NAME,
+    CID_LANG0 = 90, CID_LANG1, CID_LANG2, CID_FONT_ZH, CID_FONT_EN,
 };
 
 enum TimerId { TM_TICK = 1, TM_ANIM = 2, TM_CARET = 3, TM_WALLPAPER = 4 };
@@ -101,6 +103,7 @@ struct Layout {
     D2D1_RECT_F addThemeBtn;
     D2D1_RECT_F dayStepper, nightStepper;
     D2D1_RECT_F appearanceSeg;
+    D2D1_RECT_F preferences[3];
     D2D1_RECT_F switchSeg;
     D2D1_RECT_F autoToggle, bootToggle;
     D2D1_RECT_F openThemesBtn;
@@ -153,10 +156,28 @@ struct RenameUI {
     std::wstring hint;
 };
 
+struct PreferencePicker {
+    int focus = -1, open = -1, displayed = -1;
+    int highlighted = 0, pressed = -1;
+    D2D1_RECT_F popup = {};
+    int rows = 0;
+    bool dropsBelow = false, pointerActive = false;
+    float pointerX = 0, pointerY = 0;
+    float reveal = 0, scroll = 0, scrollTarget = 0;
+    std::wstring search;
+    ULONGLONG lastKey = 0;
+};
+
 struct App {
     HWND hwnd = nullptr;
     Gfx gfx;
     Config cfg;
+    PreferencePicker picker;
+    bool preferenceMotion = true;
+    float languageAnim = 0, languageScale = 1;
+    bool languagePressed = false;
+    std::vector<FontFamilyOption> installedFonts;
+    bool fontListReady = false;
     std::vector<ThemeInfo> themes;
     int selIdx = 0;
     std::wstring appliedImage;               // Update only after all monitors confirm; retry failures a limited number of times.
@@ -377,7 +398,11 @@ static void ComputeLayout(Layout& L) {
     L.appearanceSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
     y += 36;
     L.appearanceSeg = D2D1::RectF(rx - 234, y, rx, y + 34);
-    y += 34 + 18;
+    for (auto& combo : L.preferences) {
+        y += Ui::ButtonH + 8;
+        combo = D2D1::RectF(rx - 234, y, rx, y + Ui::ButtonH);
+    }
+    y += Ui::ButtonH + 18;
 
     // Options.
     L.optionSectionTitle = D2D1::RectF(lx, y, rx, y + 27);
@@ -407,8 +432,8 @@ static void ComputeLayout(Layout& L) {
 
     // Centered Add theme dialog.
     const float cw = 560, ch = 424;
-    float cx = (W - cw) / 2, cy0 = (H - ch) / 2 - 40;
-    if (cy0 < 90) cy0 = 90;
+    float cx = (W - cw) / 2;
+    float cy0 = (std::max)(Ui::TitleBarH + 8, (H + Ui::TitleBarH - ch) / 2);
     L.ovCard = D2D1::RectF(cx, cy0, cx + cw, cy0 + ch);
     float px = L.ovCard.left + 24, pr = L.ovCard.right - 24;
     L.ovName      = D2D1::RectF(px, L.ovCard.top + 76, pr, L.ovCard.top + 112);
@@ -505,6 +530,181 @@ static void MarkScrolled() {
     g_app.lastScrollMs = qpcMs();
 }
 
+static void RefreshAppLanguage() {
+    const bool chinese = ResolveAppLanguage(g_app.cfg.language,
+        g_app.cfg.language == AppLanguage::System && WindowsPrefersChinese());
+    if (chinese != g_appChinese) {
+        // Don't leave a cached message in the previous language after switching.
+        g_app.statusMsg.clear();
+        g_app.fontListReady = false;
+    }
+    g_appChinese = chinese;
+    g_app.gfx.setTextLocale(chinese);
+}
+
+static int FontChoiceCount() {
+    return 1 + (int)g_app.installedFonts.size();
+}
+
+static int SelectedFont(int field) {
+    const auto& name = field == 1 ? g_app.cfg.chineseFont : g_app.cfg.englishFont;
+    for (size_t i = 0; !name.empty() && i < g_app.installedFonts.size(); ++i)
+        if (lstrcmpiW(g_app.installedFonts[i].name.c_str(), name.c_str()) == 0) return (int)i + 1;
+    return 0;
+}
+
+static const wchar_t* FontChoiceLabel(int index) {
+    if (!index) return AppText(L"Follow system", L"跟随系统");
+    return g_app.installedFonts[index - 1].label.c_str();
+}
+
+static void EnsureFontList() {
+    if (g_app.fontListReady || !g_app.gfx.dc()) return;
+    g_app.installedFonts = g_app.gfx.installedFonts();
+    g_app.fontListReady = true;
+}
+
+static void ClosePreferencePicker(bool immediate = false) {
+    auto& c = g_app.picker;
+    if (c.displayed < 0) return;
+    const bool captured = c.pressed >= 0 && GetCapture() == g_app.hwnd;
+    c.open = c.pressed = -1;
+    c.pointerActive = false;
+    c.scrollTarget = c.scroll;
+    c.search.clear();
+    if (immediate || !g_app.preferenceMotion || c.reveal == 0) {
+        c.displayed = -1;
+        c.reveal = 0;
+    } else {
+        StartAnim();
+    }
+    if (captured) ReleaseCapture();
+    InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+static void RefreshPreferenceMotion() {
+    BOOL enabled = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0);
+    g_app.preferenceMotion = enabled != FALSE;
+    if (!enabled) {
+        auto& c = g_app.picker;
+        if (c.open >= 0) {
+            c.reveal = 1.0f;
+            c.scroll = c.scrollTarget;
+        } else {
+            ClosePreferencePicker(true);
+        }
+        g_app.languageAnim = (float)g_app.cfg.language;
+        g_app.languageScale = 1.0f;
+    }
+}
+
+static void SelectLanguage(AppLanguage language) {
+    if (language == g_app.cfg.language) return;
+    ClosePreferencePicker(true);
+    g_app.cfg.language = language;
+    RefreshAppLanguage();
+    if (g_app.preferenceMotion) StartAnim();
+    else g_app.languageAnim = (float)language;
+    SaveConfig(g_app.cfg);
+    InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+static void SelectUiFont(int index) {
+    const int field = g_app.picker.open;
+    if (field < 1 || index < 0 || index >= FontChoiceCount()) return;
+    ClosePreferencePicker();
+    auto& family = field == 1 ? g_app.cfg.chineseFont : g_app.cfg.englishFont;
+    family = index ? g_app.installedFonts[index - 1].name : L"";
+    g_app.gfx.setUiFonts(g_app.cfg.chineseFont, g_app.cfg.englishFont);
+    SaveConfig(g_app.cfg);
+}
+
+static constexpr float kPickerRow = 32, kPickerPad = 4;
+
+static float FontScrollLimit(const PreferencePicker& c) {
+    return (FontChoiceCount() - c.rows) * kPickerRow;
+}
+
+static void SetFontScroll(float target) {
+    auto& c = g_app.picker;
+    c.scrollTarget = std::clamp(target, 0.0f, FontScrollLimit(c));
+    if (g_app.preferenceMotion) StartAnim();
+    else c.scroll = c.scrollTarget;
+    InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+static D2D1_RECT_F RevealedFontPopup(const PreferencePicker& c) {
+    auto r = c.popup;
+    const float hidden = (r.bottom - r.top) * (1.0f - c.reveal);
+    if (c.dropsBelow) r.bottom -= hidden;
+    else r.top += hidden;
+    return r;
+}
+
+static void RevealPreference(int field) {
+    const auto& r = g_app.L.preferences[field];
+    const auto current = g_app.scroll;
+    const float top = Ui::TitleBarH + 6, bottom = g_app.winHDip - 10;
+    if (r.top - current < top) g_app.scrollTarget = r.top - top;
+    else if (r.bottom - current > bottom) g_app.scrollTarget = r.bottom - bottom;
+    else g_app.scrollTarget = current;
+    ClampScrollTarget();
+    g_app.scroll = g_app.scrollTarget;
+    if (g_app.scroll != current) { MarkScrolled(); StartAnim(); }
+}
+
+static void OpenPreferencePicker(int field) {
+    if (field < 1 || field > 2) return;
+    EnsureFontList();
+    RevealPreference(field);
+    auto& c = g_app.picker;
+    const auto& r = g_app.L.preferences[field];
+    const float top = r.top - g_app.scroll, bottom = r.bottom - g_app.scroll;
+    const float above = top - (Ui::TitleBarH + 8), below = g_app.winHDip - 12 - bottom;
+    const int count = FontChoiceCount(), desired = (std::min)(8, count);
+    const bool dropsBelow = below >= desired * kPickerRow + 2 * kPickerPad || below >= above;
+    const int rows = (std::min)(desired, (int)(((dropsBelow ? below : above) - 2 * kPickerPad) / kPickerRow));
+    if (rows < 1) return;
+    const float height = rows * kPickerRow + 2 * kPickerPad;
+    const auto popup = D2D1::RectF(r.left, dropsBelow ? bottom + 2 : top - height - 2,
+                                 r.right, dropsBelow ? bottom + height + 2 : top - 2);
+    const bool samePopup = c.displayed == field && c.dropsBelow == dropsBelow &&
+        c.popup.left == popup.left && c.popup.top == popup.top && c.popup.bottom == popup.bottom;
+    c.rows = rows;
+    c.popup = popup;
+    c.dropsBelow = dropsBelow;
+    c.open = c.displayed = c.focus = field;
+    c.highlighted = SelectedFont(field);
+    c.scrollTarget = (float)std::clamp(c.highlighted - rows / 2, 0, count - rows) * kPickerRow;
+    if (!samePopup) c.scroll = c.scrollTarget;
+    c.reveal = !g_app.preferenceMotion ? 1.0f : (samePopup ? c.reveal : 0.0f);
+    c.pressed = -1;
+    c.pointerActive = false;
+    if (g_app.preferenceMotion) StartAnim();
+    InvalidateRect(g_app.hwnd, nullptr, FALSE);
+}
+
+static void MovePreferenceHighlight(int index) {
+    auto& c = g_app.picker;
+    c.pointerActive = false;
+    c.highlighted = std::clamp(index, 0, FontChoiceCount() - 1);
+    const float top = c.highlighted * kPickerRow;
+    SetFontScroll(std::clamp(c.scrollTarget, top - (c.rows - 1) * kPickerRow, top));
+}
+
+static int HitPreferenceItem(float x, float y) {
+    const auto& c = g_app.picker;
+    if (c.open < 0) return -1;
+    const auto& r = c.popup;
+    const auto visible = RevealedFontPopup(c);
+    const float rightInset = FontChoiceCount() > c.rows ? 10 : kPickerPad;
+    if (x < r.left + kPickerPad || x >= r.right - rightInset ||
+        y < visible.top + kPickerPad || y >= visible.bottom - kPickerPad) return -1;
+    const int i = (int)((y - r.top - kPickerPad + c.scroll) / kPickerRow);
+    return i < FontChoiceCount() ? i : -1;
+}
+
 // Scroll only when the selected card is clipped at the top or bottom of the viewport.
 // Use instant=true at startup to avoid an unnecessary scroll animation.
 static void EnsureCardVisible(int idx, bool instant) {
@@ -575,6 +775,13 @@ static int HitTest(float x, float y) {
     auto inC = [&](const D2D1_RECT_F& r) {
         return x >= r.left && x <= r.right && cy >= r.top && cy <= r.bottom;
     };
+
+    if (inC(L.preferences[0])) {
+        const auto& r = L.preferences[0];
+        return CID_LANG0 + std::clamp((int)((x - r.left) * 3 / (r.right - r.left)), 0, 2);
+    }
+    for (int field = 1; field <= 2; ++field)
+        if (inC(L.preferences[field])) return CID_FONT_ZH + field - 1;
 
     if (inC(L.addThemeBtn)) return CID_ADD_THEME;
     // Card actions are clickable only when drawn on a hovered card, avoiding accidental changes.
@@ -828,6 +1035,62 @@ static void DrawAppearance(Gfx& g, const Palette& p) {
     }
     UiSegmented(g, L.appearanceSeg, items, g_app.cfg.appearance, hotSeg, p,
                 g_app.segAnim, g_app.segScale);
+
+    EnsureFontList();
+    const wchar_t* labels[] = {AppText(L"App language", L"界面语言"),
+        AppText(L"Chinese font", L"中文字体"), AppText(L"English font", L"英文字体")};
+    for (int field = 0; field < 3; ++field) {
+        const auto& r = L.preferences[field];
+        g.textOptical(labels[field], f, D2D1::RectF(L.contentL, r.top, r.left - 12, r.bottom), p.textPrimary);
+        if (field == 0) {
+            const std::vector<std::wstring> languages = {AppText(L"System", L"跟随系统"),
+                AppText(L"Chinese", L"中文"), AppText(L"English", L"英文")};
+            const int hot = g_app.hot >= CID_LANG0 && g_app.hot <= CID_LANG2 ? g_app.hot - CID_LANG0 : -1;
+            UiSegmented(g, r, languages, (int)g_app.cfg.language, hot, p,
+                        g_app.languageAnim, g_app.languageScale);
+            if (g_app.picker.focus == 0)
+                g.strokeRound(D2D1::RoundedRect(r, Ui::RadiusControl, Ui::RadiusControl), p.accent);
+        } else {
+            const int id = CID_FONT_ZH + field - 1;
+            UiComboBox(g, r, FontChoiceLabel(SelectedFont(field)), p, g_app.hot == id, g_app.pressed == id,
+                       g_app.picker.focus == field, g_app.picker.open == field);
+        }
+    }
+}
+
+static void DrawPreferencePicker(Gfx& g, const Palette& p) {
+    const auto& c = g_app.picker;
+    if (c.displayed < 0 || c.reveal <= 0.0f) return;
+    const auto& r = c.popup;
+    const auto visible = RevealedFontPopup(c);
+    if (visible.bottom - visible.top < 1.0f) return;
+    const int selected = SelectedFont(c.displayed), count = FontChoiceCount();
+    const float limit = FontScrollLimit(c);
+    const bool scrollable = limit > 0;
+    const int highlighted = c.pointerActive ? HitPreferenceItem(c.pointerX, c.pointerY) : c.highlighted;
+    UiComboPopup(g, visible, p);
+    const float top = r.top + kPickerPad, bottom = r.bottom - kPickerPad;
+    const float clipTop = (std::max)(top, visible.top + kPickerPad);
+    const float clipBottom = (std::min)(bottom, visible.bottom - kPickerPad);
+    if (clipBottom <= clipTop) return;
+    g.dc()->PushAxisAlignedClip(D2D1::RectF(r.left + kPickerPad, clipTop, r.right - 2, clipBottom),
+                               D2D1_ANTIALIAS_MODE_ALIASED);
+    const int first = (int)(c.scroll / kPickerRow);
+    const int end = (std::min)(count, first + c.rows + 1);
+    for (int i = first; i < end; ++i) {
+        const float y = top + i * kPickerRow - c.scroll;
+        UiComboItem(g, D2D1::RectF(r.left + kPickerPad, y, r.right - (scrollable ? 10 : kPickerPad),
+                                  y + kPickerRow), FontChoiceLabel(i), p, i == selected,
+                    c.open >= 0 && i == highlighted);
+    }
+    if (scrollable) {
+        const float track = c.rows * kPickerRow;
+        const float height = (std::max)(18.0f, track * c.rows / count);
+        const float y = top + (track - height) * c.scroll / limit;
+        g.fillRound(D2D1::RoundedRect(D2D1::RectF(r.right - 6, y, r.right - 3, y + height), 1.5f, 1.5f),
+                    p.textTertiary);
+    }
+    g.dc()->PopAxisAlignedClip();
 }
 
 static void DrawSwitchSection(Gfx& g, const Palette& p) {
@@ -1870,6 +2133,7 @@ static void RenderFrame() {
 
     DrawTitleBar(g, p);
     DrawScrollbar(g, p);
+    DrawPreferencePicker(g, p);
 
     if (g_app.delUI.active) DrawDelThemeDialog(g, p);
     if (g_app.renUI.active) DrawRenameDialog(g, p);
@@ -2306,6 +2570,7 @@ static void ShowMainWindow() {
         g_app.toggleAnim[1] = g_app.toggleTarget[1];
         g_app.segAnim = (float)g_app.segTarget;
         g_app.swAnim = (float)g_app.swTarget;
+        g_app.languageAnim = (float)g_app.cfg.language;
     }
     if (IsIconic(g_app.hwnd)) {
         SendMessageW(g_app.hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
@@ -2318,6 +2583,7 @@ static void ShowMainWindow() {
 }
 
 static void HideMainWindow() {
+    ClosePreferencePicker(true);
     // On the first close-to-tray action, explain that the app is still running.
     static bool tipped = false;
     if (!tipped && g_app.trayAdded) {
@@ -2336,6 +2602,28 @@ static void HideMainWindow() {
     StartWindowAnim(false);
 }
 
+static bool Approach(float& value, float target, float fraction, float tolerance) {
+    const float delta = target - value;
+    if (fabsf(delta) <= tolerance) { value = target; return false; }
+    value += delta * fraction;
+    return true;
+}
+
+static bool StepPreferenceMotion(float revealEase, float scrollEase, float pressEase) {
+    auto& c = g_app.picker;
+    bool busy = false;
+    if (c.displayed >= 0) {
+        busy |= Approach(c.reveal, c.open >= 0 ? 1.0f : 0.0f, revealEase, 0.004f);
+        busy |= Approach(c.scroll, c.scrollTarget, scrollEase, 0.15f);
+        if (c.open < 0 && c.reveal == 0) c.displayed = -1;
+    }
+    if (g_app.preferenceMotion) {
+        busy |= Approach(g_app.languageAnim, (float)g_app.cfg.language, revealEase, 0.002f);
+        busy |= Approach(g_app.languageScale, g_app.languagePressed ? 0.93f : 1.0f, pressEase, 0.002f);
+    }
+    return busy;
+}
+
 static void StepAnim() {
     bool busy = false;
     // Scale exponential easing by actual elapsed QPC time so motion is frame-rate independent.
@@ -2346,6 +2634,7 @@ static void StepAnim() {
     if (dt < 2.0f) dt = 2.0f;
     if (dt > 60.0f) dt = 60.0f;
     auto ease = [&](float k0) { return 1.0f - powf(1.0f - k0, dt / 15.6f); };
+    busy |= StepPreferenceMotion(ease(0.36f), ease(0.28f), ease(0.45f));
     for (int i = 0; i < 2; ++i) {        // Toggle knobs.
         float d = g_app.toggleTarget[i] - g_app.toggleAnim[i];
         if (d > 0.001f || d < -0.001f) {
@@ -2694,9 +2983,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
             mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
         }
-        // Minimum width fits three cards; minimum height accommodates all sections.
-        int minW = (int)((kPadX * 2 + 3 * (kCardW + 12) + 12) * dpi / 96.0f);
-        int minH = (int)((kWinH + 8) * dpi / 96.0f);
+        // The page scrolls. Only the fixed-size dialogs set the minimum client area.
+        if (!dpi) dpi = GetDpiForSystem();
+        int minW = (int)std::ceil(kMinWinW * dpi / 96.0f);
+        int minH = (int)std::ceil(kMinWinH * dpi / 96.0f);
         if (mmi->ptMinTrackSize.x < minW) mmi->ptMinTrackSize.x = minW;
         if (mmi->ptMinTrackSize.y < minH) mmi->ptMinTrackSize.y = minH;
         return res;
@@ -2731,6 +3021,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     }
 
     case WM_SIZE:
+        ClosePreferencePicker(true);
         // Do not use minimized icon-placeholder dimensions for layout or graphics buffers.
         if (w == SIZE_MINIMIZED || IsIconic(h)) return 0;
         if (g_app.gfx.dc()) {
@@ -2775,6 +3066,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     }
 
     case WM_SETTINGCHANGE: {
+        if (w == 0 || w == SPI_SETCLIENTAREAANIMATION) RefreshPreferenceMotion();
+        if (g_app.cfg.language == AppLanguage::System &&
+            (w == 0 || w == SPI_SETNONCLIENTMETRICS)) {
+            const bool wasChinese = g_appChinese;
+            RefreshAppLanguage();
+            if (wasChinese != g_appChinese) ClosePreferencePicker(true);
+        }
+        if (w == SPI_SETNONCLIENTMETRICS) g_app.gfx.refreshFonts();
         RefreshPalette();
         CheckExternalWallpaper();
         // React to app-theme changes immediately; the five-second poll is only a fallback.
@@ -2785,9 +3084,37 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         return 0;
     }
 
+    case WM_FONTCHANGE:
+        ClosePreferencePicker(true);
+        g_app.gfx.refreshFonts();
+        g_app.fontListReady = false;
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+
+    case WM_ENTERSIZEMOVE:
+    case WM_CANCELMODE:
+        ClosePreferencePicker(true);
+        break;
+
+    case WM_KILLFOCUS:
+        ClosePreferencePicker();
+        g_app.picker.focus = -1;
+        InvalidateRect(h, nullptr, FALSE);
+        break;
+
     // Wheel scrolling updates the animation target by 96 DIPs per notch.
     // Scale smaller touchpad/high-resolution deltas proportionally.
     case WM_MOUSEWHEEL: {
+        auto& c = g_app.picker;
+        if (c.open >= 0) {
+            const float delta = (float)GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA * 3 * kPickerRow;
+            SetFontScroll(c.scrollTarget - delta);
+            const int first = (int)ceilf(c.scrollTarget / kPickerRow);
+            const int last = (int)floorf(c.scrollTarget / kPickerRow) + c.rows - 1;
+            c.highlighted = std::clamp(c.highlighted, first, (std::max)(first, last));
+            return 0;
+        }
+        ClosePreferencePicker(true);
         if (AnyDialogOpen()) return 0;              // Do not scroll page content behind a modal dialog.
         const Layout& L = g_app.L;
         if (L.maxScroll <= 0.0f) return 0;          // All content fits; there is nothing to scroll.
@@ -2803,6 +3130,16 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     case WM_MOUSEMOVE: {
         float s = g_app.gfx.scale();
         float my = GET_Y_LPARAM(l) / s;
+        if (g_app.picker.open >= 0) {
+            auto& c = g_app.picker;
+            c.pointerActive = true;
+            c.pointerX = GET_X_LPARAM(l) / s;
+            c.pointerY = my;
+            const int item = HitPreferenceItem(c.pointerX, my);
+            if (item >= 0) c.highlighted = item;
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
         // Dragging the scrollbar tracks the pointer immediately without easing.
         if (g_app.sbDragging) {
             const Layout& L = g_app.L;
@@ -2829,12 +3166,26 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     case WM_MOUSELEAVE:
         g_app.hot = CID_NONE;
         g_app.pressed = CID_NONE;
+        g_app.picker.pointerActive = false;
         InvalidateRect(h, nullptr, FALSE);
         return 0;
 
     case WM_LBUTTONDOWN: {
         float s = g_app.gfx.scale();
-        g_app.pressed = HitTest(GET_X_LPARAM(l) / s, GET_Y_LPARAM(l) / s);
+        const float x = GET_X_LPARAM(l) / s, y = GET_Y_LPARAM(l) / s;
+        if (g_app.picker.open >= 0) {
+            int item = HitPreferenceItem(x, y);
+            if (item < 0) ClosePreferencePicker();
+            else { g_app.picker.pressed = item; SetCapture(h); }
+            return 0;
+        }
+        g_app.pressed = HitTest(x, y);
+        const bool language = g_app.pressed >= CID_LANG0 && g_app.pressed <= CID_LANG2;
+        g_app.picker.focus = language ? 0 : g_app.pressed == CID_FONT_ZH ? 1 : g_app.pressed == CID_FONT_EN ? 2 : -1;
+        if (language && g_app.preferenceMotion) {
+            g_app.languagePressed = true;
+            StartAnim();
+        }
         // Drag the thumb or page by slightly more than half a viewport when clicking the track.
         if (g_app.pressed == CID_SCROLLBAR) {
             D2D1_RECT_F th = ScrollThumbRect();
@@ -2867,6 +3218,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
 
     case WM_LBUTTONUP: {
         float s = g_app.gfx.scale();
+        if (g_app.picker.open >= 0) {
+            int item = HitPreferenceItem(GET_X_LPARAM(l) / s, GET_Y_LPARAM(l) / s);
+            int pressed = g_app.picker.pressed;
+            g_app.picker.pressed = -1;
+            if (GetCapture() == h) ReleaseCapture();
+            if (pressed >= 0 && item == pressed) SelectUiFont(item);
+            return 0;
+        }
         int id = HitTest(GET_X_LPARAM(l) / s, GET_Y_LPARAM(l) / s);
         ReleaseCapture();
         int pressed = g_app.pressed;
@@ -2881,6 +3240,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         }
         if (g_app.swPressed) {
             g_app.swPressed = false;
+            StartAnim();
+        }
+        if (g_app.languagePressed) {
+            g_app.languagePressed = false;
             StartAnim();
         }
         if (id != pressed || id == CID_NONE) { InvalidateRect(h, nullptr, FALSE); return 0; }
@@ -2937,6 +3300,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             ConfirmAddTheme();
         } else if (id == CID_OV_LIGHT_SLOT) {
             PickAddThemeImage(true);
+        } else if (id >= CID_LANG0 && id <= CID_LANG2) {
+            SelectLanguage(static_cast<AppLanguage>(id - CID_LANG0));
+        } else if (id == CID_FONT_ZH || id == CID_FONT_EN) {
+            OpenPreferencePicker(id - CID_FONT_ZH + 1);
         } else if (id == CID_OV_DARK_SLOT) {
             PickAddThemeImage(false);
         } else if (id == CID_OV_NAME) {
@@ -2984,7 +3351,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
         return 0;
 
     case WM_APP + 4: {    // Handle --set-theme from another instance: reload settings and apply immediately.
+        ClosePreferencePicker(true);
         g_app.cfg = LoadConfig();
+        RefreshAppLanguage();
+        if (g_app.preferenceMotion) StartAnim();
+        else g_app.languageAnim = (float)g_app.cfg.language;
+        g_app.gfx.setUiFonts(g_app.cfg.chineseFont, g_app.cfg.englishFont);
         g_app.themes = ScanThemes();
         g_app.selIdx = g_app.cfg.noTheme ? -1 : 0;
         for (size_t i = 0; i < g_app.themes.size(); ++i)
@@ -3074,10 +3446,66 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             if (g_app.renUI.active) CloseRenameTheme();
             return 0;
         }
+        if (!AnyDialogOpen()) {
+            auto& c = g_app.picker;
+            if (w == VK_TAB) {
+                ClosePreferencePicker();
+                const bool backwards = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                c.focus = c.focus < 0 ? (backwards ? 2 : 0) : c.focus + (backwards ? -1 : 1);
+                if (c.focus > 2) c.focus = -1;
+                if (c.focus >= 0) RevealPreference(c.focus);
+                InvalidateRect(h, nullptr, FALSE);
+                return 0;
+            }
+            if (c.open >= 0) {
+                switch (w) {
+                case VK_ESCAPE: case VK_F4: ClosePreferencePicker(); break;
+                case VK_RETURN: case VK_SPACE: SelectUiFont(c.highlighted); break;
+                case VK_UP: MovePreferenceHighlight(c.highlighted - 1); break;
+                case VK_DOWN: MovePreferenceHighlight(c.highlighted + 1); break;
+                case VK_PRIOR: MovePreferenceHighlight(c.highlighted - c.rows); break;
+                case VK_NEXT: MovePreferenceHighlight(c.highlighted + c.rows); break;
+                case VK_HOME: MovePreferenceHighlight(0); break;
+                case VK_END: MovePreferenceHighlight(FontChoiceCount() - 1); break;
+                }
+                return 0;
+            }
+            if (c.focus == 0 && (w == VK_LEFT || w == VK_RIGHT || w == VK_HOME || w == VK_END)) {
+                const int current = (int)g_app.cfg.language;
+                const int next = w == VK_HOME ? 0 : w == VK_END ? 2
+                    : std::clamp(current + (w == VK_LEFT ? -1 : 1), 0, 2);
+                SelectLanguage(static_cast<AppLanguage>(next));
+                return 0;
+            }
+            if (c.focus > 0 && (w == VK_RETURN || w == VK_SPACE || w == VK_F4 || w == VK_DOWN || w == VK_UP)) {
+                OpenPreferencePicker(c.focus);
+                return 0;
+            }
+        }
         break;
     }
 
     case WM_CHAR: {
+        auto& c = g_app.picker;
+        if (c.open >= 0 && w >= 33 && w != 127) {
+            const auto now = GetTickCount64();
+            if (now - c.lastKey > 850) c.search.clear();
+            c.lastKey = now;
+            c.search += (wchar_t)w;
+            auto find = [&]() {
+                for (int i = 0; i < FontChoiceCount(); ++i) {
+                    const wchar_t* label = FontChoiceLabel(i);
+                    if (wcslen(label) >= c.search.size() && CompareStringOrdinal(label, (int)c.search.size(),
+                        c.search.c_str(), (int)c.search.size(), TRUE) == CSTR_EQUAL) {
+                        MovePreferenceHighlight(i);
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (!find() && c.search.size() > 1) { c.search.assign(1, (wchar_t)w); find(); }
+            return 0;
+        }
         // Direct character input; IME composition uses WM_IME_* instead.
         TextEdit* ed = ActiveEdit();
         if (ed) {
@@ -3172,8 +3600,6 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetCurrentProcessExplicitAppUserModelID(kShellAppId);
-    g_appChinese = InstalledLanguageIsChinese();
-    g_app.gfx.setTextLocale(g_appChinese);
 
     // Command-line arguments.
     int argc = 0;
@@ -3247,6 +3673,8 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     // Settings and themes.
     g_app.cfg = LoadConfig();
+    RefreshAppLanguage();
+    g_app.gfx.setUiFonts(g_app.cfg.chineseFont, g_app.cfg.englishFont);
     // The registry is authoritative for startup; an installer may have changed it since config was saved.
     {
         bool regAuto = AutoStartEnabled();
@@ -3419,6 +3847,8 @@ int wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Start the appearance indicator at the configured segment without animating at startup.
     g_app.segTarget = g_app.cfg.appearance;
     g_app.segAnim = (float)g_app.cfg.appearance;
+    g_app.languageAnim = (float)g_app.cfg.language;
+    RefreshPreferenceMotion();
     g_app.swTarget = g_app.cfg.switchMode;
     g_app.swAnim = (float)g_app.cfg.switchMode;
     ComputeLayout(g_app.L);

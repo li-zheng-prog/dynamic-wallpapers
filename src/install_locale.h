@@ -59,7 +59,7 @@ inline bool InstalledLanguageIsChinese() {
     return chinese;
 }
 
-// Set once at application startup. Core helpers use the same language as the window and tray.
+// Core helpers use the active application language, independent of installer language.
 inline bool g_appChinese = false;
 inline const wchar_t* AppText(const wchar_t* english, const wchar_t* chinese) {
     return g_appChinese ? chinese : english;

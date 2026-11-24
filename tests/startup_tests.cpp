@@ -503,77 +503,10 @@ static void TestNativeMinimize() {
     std::puts("PASS: native minimize/restore, placement, maximized state, fade interruption");
 }
 
-static std::wstring MappedUiFont(IDWriteTextFormat* format, IDWriteFontCollection* fonts, UINT32 position) {
-    // Ask DirectWrite to map both positions in the same mixed-language string.
-    class MixedText final : public IDWriteTextAnalysisSource {
-        const wchar_t* text = L"A\u4E2D";
-    public:
-        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
-            *object = nullptr;
-            if (iid != IID_IUnknown && iid != __uuidof(IDWriteTextAnalysisSource)) return E_NOINTERFACE;
-            *object = this;
-            AddRef();
-            return S_OK;
-        }
-        ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
-        ULONG STDMETHODCALLTYPE Release() override { return 1; }
-        HRESULT STDMETHODCALLTYPE GetTextAtPosition(UINT32 pos, const wchar_t** out, UINT32* len) override {
-            *out = pos < 2 ? text + pos : nullptr;
-            *len = pos < 2 ? 2 - pos : 0;
-            return S_OK;
-        }
-        HRESULT STDMETHODCALLTYPE GetTextBeforePosition(UINT32 pos, const wchar_t** out, UINT32* len) override {
-            *out = pos > 0 && pos <= 2 ? text : nullptr;
-            *len = *out ? pos : 0;
-            return S_OK;
-        }
-        DWRITE_READING_DIRECTION STDMETHODCALLTYPE GetParagraphReadingDirection() override {
-            return DWRITE_READING_DIRECTION_LEFT_TO_RIGHT;
-        }
-        HRESULT STDMETHODCALLTYPE GetLocaleName(UINT32 pos, UINT32* len, const wchar_t** locale) override {
-            *locale = L"en-US";
-            *len = pos < 2 ? 2 - pos : 0;
-            return S_OK;
-        }
-        HRESULT STDMETHODCALLTYPE GetNumberSubstitution(UINT32 pos, UINT32* len,
-                                                       IDWriteNumberSubstitution** sub) override {
-            *sub = nullptr;
-            *len = pos < 2 ? 2 - pos : 0;
-            return S_OK;
-        }
-    } source;
-    IDWriteTextFormat1* format1 = nullptr;
-    IDWriteFontFallback* fallback = nullptr;
-    if (FAILED(format->QueryInterface(IID_PPV_ARGS(&format1)))) return {};
-    format1->GetFontFallback(&fallback);
-    format1->Release();
-    if (!fallback) return {};
-    wchar_t base[64] = {};
-    format->GetFontFamilyName(base, ARRAYSIZE(base));
-    IDWriteFont* mapped = nullptr;
-    UINT32 length = 0;
-    float scale = 0.0f;
-    fallback->MapCharacters(&source, position, 1, fonts, base, format->GetFontWeight(),
-                            format->GetFontStyle(), format->GetFontStretch(), &length, &mapped, &scale);
-    fallback->Release();
-    std::wstring result;
-    if (mapped) {
-        IDWriteFontFamily* family = nullptr;
-        if (SUCCEEDED(mapped->GetFontFamily(&family))) {
-            IDWriteLocalizedStrings* names = nullptr;
-            if (SUCCEEDED(family->GetFamilyNames(&names))) {
-                wchar_t name[64] = {};
-                UINT32 index = 0;
-                BOOL found = FALSE;
-                names->FindLocaleName(L"en-us", &index, &found);
-                if (SUCCEEDED(names->GetString(found ? index : 0, name, ARRAYSIZE(name)))) result = name;
-                names->Release();
-            }
-            family->Release();
-        }
-        mapped->Release();
-    }
-    return result;
+static std::wstring LayoutFont(IDWriteTextLayout* layout, UINT32 position) {
+    wchar_t family[256] = {};
+    Check(SUCCEEDED(layout->GetFontFamilyName(position, family, ARRAYSIZE(family))), "read font run");
+    return family;
 }
 
 static void TestLocalization() {
@@ -609,23 +542,158 @@ static void TestLocalization() {
     wchar_t family[64] = {};
     Check(fallbackFace && SUCCEEDED(fallbackFace->GetFontFamilyName(family, 64)) &&
           lstrcmpiW(family, L"Segoe UI") == 0, "missing fonts skip to a real installed family");
-    for (auto* format : {zh, en}) {
-        Check(SUCCEEDED(format->GetFontFamilyName(family, ARRAYSIZE(family))) &&
-              lstrcmpiW(family, L"Segoe UI") == 0, "both UI languages retain the system Latin font");
-        IDWriteFontCollection* fonts = nullptr;
-        Check(SUCCEEDED(format->GetFontCollection(&fonts)), "read system fonts for locale test");
-        UINT32 index = 0;
-        BOOL hasNSimSun = FALSE;
-        fonts->FindFamilyName(L"NSimSun", &index, &hasNSimSun);
-        if (hasNSimSun) {
-            Check(MappedUiFont(format, fonts, 0) == L"Segoe UI" &&
-                  MappedUiFont(format, fonts, 1) == L"NSimSun", "mixed text maps Latin and Han separately");
-        }
-        fonts->Release();
-    }
+    NONCLIENTMETRICSW metrics = {sizeof(metrics)};
+    Check(SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0), "read Windows message font");
+    Check(SUCCEEDED(en->GetFontFamilyName(family, ARRAYSIZE(family))), "read system UI font");
+    const std::wstring systemFamily = family;
+    Check(SUCCEEDED(zh->GetFontFamilyName(family, ARRAYSIZE(family))) && systemFamily == family &&
+          (systemFamily == metrics.lfMessageFont.lfFaceName || systemFamily == L"Segoe UI"),
+          "both UI languages use Windows typography by default");
+    Check(ResolveAppLanguage(AppLanguage::System, true) && !ResolveAppLanguage(AppLanguage::System, false) &&
+          ResolveAppLanguage(AppLanguage::Chinese, false) && !ResolveAppLanguage(AppLanguage::English, true) &&
+          ParseAppLanguage(AppLanguageTag(AppLanguage::Chinese)) == AppLanguage::Chinese &&
+          ParseAppLanguage(L"invalid") == AppLanguage::System, "default, forced and saved application languages");
+    Check(DecodeFontPreference(EncodeFontPreference(L"\u5fae\u8f6f\u96c5\u9ed1 2")) == L"\u5fae\u8f6f\u96c5\u9ed1 2" &&
+          DecodeFontPreference(L"Tahoma") == L"Tahoma" && DecodeFontPreference(L"u16:broken").empty() &&
+          DecodeFontPreference(EncodeFontPreference(L"")).empty(), "new, legacy, invalid and default font preference values");
+
+    const auto fonts = g_app.gfx.installedFonts();
+    Check(std::any_of(fonts.begin(), fonts.end(), [](const auto& f) { return f.name == L"Arial" && !f.label.empty(); }),
+          "enumerate local font names and display labels");
+    const wchar_t* mixed = L"A\u4E2D\U00020000\uFF0Cz";
+    auto* layout = g_app.gfx.textLayout(mixed, en, 400, 100);
+    wchar_t scriptLocale[16] = {};
+    Check(layout && LayoutFont(layout, 0) == systemFamily && LayoutFont(layout, 1) == systemFamily &&
+          SUCCEEDED(layout->GetLocaleName(1, scriptLocale, ARRAYSIZE(scriptLocale))) && lstrcmpiW(scriptLocale, L"zh-CN") == 0,
+          "system retains base font and supplies appropriate Chinese fallback locale in English UI");
+    IDWriteTextLayout2* layout2 = nullptr;
+    IDWriteFontFallback* forcedFallback = nullptr;
+    Check(SUCCEEDED(layout->QueryInterface(IID_PPV_ARGS(&layout2))) &&
+          SUCCEEDED(layout2->GetFontFallback(&forcedFallback)) && !forcedFallback,
+          "default layout does not override the Windows fallback chain");
+    layout2->Release();
+    layout->Release();
+    g_app.gfx.setUiFonts(L"Tahoma", L"Arial");
+    layout = g_app.gfx.textLayout(mixed, en, 400, 100);
+    Check(layout && LayoutFont(layout, 0) == L"Arial" && LayoutFont(layout, 1) == L"Tahoma" &&
+          LayoutFont(layout, 2) == L"Tahoma" && LayoutFont(layout, 3) == L"Tahoma" &&
+          LayoutFont(layout, 4) == L"Tahoma" && LayoutFont(layout, 5) == L"Arial",
+          "each script uses its selected family in the same layout, including supplementary Han");
+    layout->Release();
+    layout = g_app.gfx.textLayout(L"A", fallbackFace, 400, 100);
+    Check(layout && LayoutFont(layout, 0) == L"Segoe UI", "explicit families and icon formats bypass custom fonts");
+    layout->Release();
+    g_app.gfx.setUiFonts(L"DynamicWallpapersMissingTestFont", L"Arial");
+    layout = g_app.gfx.textLayout(mixed, en, 400, 100);
+    Check(layout && LayoutFont(layout, 1) == systemFamily && LayoutFont(layout, 0) == L"Arial",
+          "unavailable preference falls back without affecting the other script");
+    layout->Release();
+    g_app.gfx.setUiFonts(L"", L"");
     g_appChinese = false;
     g_app.gfx.setTextLocale(false);
-    std::puts("PASS: installer/app locale handoff, localized text and DirectWrite font selection");
+    std::puts("PASS: independent installer/app languages, localized text and mixed DirectWrite fonts");
+}
+
+static void TestAppearancePickersAndResize() {
+    const Config previous = g_app.cfg;
+    HWND h = g_app.hwnd;
+    RECT before = {};
+    GetWindowRect(h, &before);
+    const float scale = g_app.gfx.scale();
+    MINMAXINFO limits = {};
+    SendMessageW(h, WM_GETMINMAXINFO, 0, (LPARAM)&limits);
+    Check(limits.ptMinTrackSize.x < kWinW * scale && limits.ptMinTrackSize.y < kWinH * scale,
+          "native tracking permits shrinking below both startup dimensions");
+    SetWindowPos(h, nullptr, 0, 0, limits.ptMinTrackSize.x, limits.ptMinTrackSize.y, SWP_NOMOVE | SWP_NOZORDER);
+    const auto& L = g_app.L;
+    Check(L.maxScroll > 0 && L.ovCard.top >= Ui::TitleBarH && L.ovOk.bottom < g_app.winHDip &&
+          L.ovCard.left >= 0 && L.ovCard.right <= g_app.winWDip,
+          "small client scrolls and still fits the largest modal");
+
+    g_app.cfg.language = AppLanguage::English;
+    g_app.languageAnim = (float)g_app.cfg.language;
+    g_app.preferenceMotion = true;
+    RefreshAppLanguage();
+    g_app.statusMsg = L"Old message";
+    SendMessageW(h, WM_KEYDOWN, VK_TAB, 0);
+    Check(g_app.picker.focus == 0 && g_app.picker.open < 0 &&
+          L.preferences[0].bottom - g_app.scroll < g_app.winHDip,
+          "keyboard reveals and focuses the language segments without a dropdown");
+    const auto& lang = L.preferences[0];
+    const float langY = (lang.top + lang.bottom) / 2 - g_app.scroll;
+    for (int i = 0; i < 3; ++i)
+        Check(HitTest(lang.left + (i + 0.5f) * (lang.right - lang.left) / 3, langY) == CID_LANG0 + i,
+              "each language segment has its own hit target");
+    SendMessageW(h, WM_KEYDOWN, VK_LEFT, 0);
+    Check(g_app.picker.open < 0 && g_appChinese && savedConfig.language == AppLanguage::Chinese &&
+          g_app.statusMsg.empty() && FormatDuration(60) == L"1 小时", "language applies and saves without restarting");
+    StepPreferenceMotion(0.5f, 0.5f, 0.5f);
+    Check(g_app.languageAnim > 1 && g_app.languageAnim < 2, "language indicator animates between segments");
+    SendMessageW(h, WM_KEYDOWN, VK_TAB, 0);
+    SendMessageW(h, WM_KEYDOWN, VK_RETURN, 0);
+    const auto& c = g_app.picker;
+    Check(c.open == 1 && FontChoiceCount() > c.rows && std::wstring(FontChoiceLabel(0)) == L"跟随系统",
+          "font picker puts system before installed fonts");
+    const float x = c.popup.left + 30;
+    const float oppositeEdge = c.dropsBelow ? c.popup.bottom - 12 : c.popup.top + 12;
+    Check(c.reveal == 0 && HitPreferenceItem(x, oppositeEdge) < 0, "opening starts hidden and clipped rows cannot be hit");
+    StepPreferenceMotion(0.5f, 0.5f, 0.5f);
+    const auto half = RevealedFontPopup(c);
+    Check(c.reveal == 0.5f && (c.dropsBelow ? half.top == c.popup.top : half.bottom == c.popup.bottom) &&
+          HitPreferenceItem(x, oppositeEdge) < 0, "partial reveal is anchored to the font control");
+    auto finishMotion = []() { for (int i = 0; i < 25; ++i) StepPreferenceMotion(0.5f, 0.5f, 0.5f); };
+    finishMotion();
+    Check(c.reveal == 1 && HitPreferenceItem(x, oppositeEdge) >= 0, "completed reveal exposes all visible rows");
+
+    SendMessageW(h, WM_KEYDOWN, VK_HOME, 0);
+    finishMotion();
+    SendMessageW(h, WM_MOUSEWHEEL, MAKEWPARAM(0, -15), 0);
+    Check(c.scroll == 0 && c.scrollTarget == 12, "high-resolution wheel or touchpad delta sets a fractional-row target");
+    StepPreferenceMotion(0.5f, 0.5f, 0.5f);
+    Check(c.scroll == 6 && HitPreferenceItem(x, c.popup.top + kPickerPad + 28) == 1,
+          "pointer hits the row drawn at the intermediate scroll offset");
+    SendMessageW(h, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA), 0);
+    Check(c.scroll == 6 && c.scrollTarget == 108, "a wheel notch adds to the scroll target without jumping the list");
+    finishMotion();
+    Check(c.scroll == 108, "wheel animation settles at its target");
+
+    SendMessageW(h, WM_KEYDOWN, VK_HOME, 0);
+    finishMotion();
+    for (int i = 0; i < c.rows; ++i) SendMessageW(h, WM_KEYDOWN, VK_DOWN, 0);
+    Check(c.highlighted == c.rows && c.scroll == 0 && c.scrollTarget == kPickerRow,
+          "arrowing past the viewport sets a nearby scroll target");
+    StepPreferenceMotion(0.5f, 0.5f, 0.5f);
+    Check(c.scroll == kPickerRow / 2, "keyboard scrolling moves through an intermediate offset");
+    SendMessageW(h, WM_KEYDOWN, VK_END, 0);
+    finishMotion();
+    Check(c.scroll == FontScrollLimit(c), "long font list navigates to the last page");
+    const int last = c.highlighted;
+    const auto expected = g_app.installedFonts[last - 1].name;
+    const auto point = MAKELPARAM((int)((c.popup.left + 30) * scale),
+        (int)((c.popup.top + kPickerPad + (c.rows - 0.5f) * kPickerRow) * scale));
+    SendMessageW(h, WM_LBUTTONDOWN, MK_LBUTTON, point);
+    SendMessageW(h, WM_LBUTTONUP, 0, point);
+    Check(c.open < 0 && c.displayed == 1 && HitPreferenceItem(x, oppositeEdge) < 0 && savedConfig.chineseFont == expected &&
+          savedConfig.englishFont == previous.englishFont, "mouse selects and saves only the targeted script");
+    StepPreferenceMotion(0.5f, 0.5f, 0.5f);
+    Check(c.reveal == 0.5f && c.displayed == 1, "close keeps the dropdown visible during the collapse");
+    finishMotion();
+    Check(c.reveal == 0 && c.displayed < 0, "close animation removes the dropdown when settled");
+    g_app.preferenceMotion = false;
+    OpenPreferencePicker(2);
+    SendMessageW(h, WM_MOUSEWHEEL, MAKEWPARAM(0, -15), 0);
+    Check(c.reveal == 1 && c.scroll == c.scrollTarget, "motion disabled makes appearance and scrolling immediate");
+    SendMessageW(h, WM_KEYDOWN, VK_ESCAPE, 0);
+    Check(c.displayed < 0, "motion disabled closes immediately");
+    g_app.cfg = previous;
+    RefreshAppLanguage();
+    g_app.gfx.setUiFonts(previous.chineseFont, previous.englishFont);
+    g_app.preferenceMotion = true;
+    g_app.languageAnim = (float)previous.language;
+    g_app.picker = {};
+    g_app.scroll = g_app.scrollTarget = 0;
+    SetWindowPos(h, nullptr, 0, 0, before.right - before.left, before.bottom - before.top, SWP_NOMOVE | SWP_NOZORDER);
+    std::puts("PASS: language segments, dropdown expand/collapse, wheel and keyboard easing, and small-window layout");
 }
 
 static std::wstring MakeBitmap(const wchar_t* name, LONG width, LONG height) {
@@ -744,13 +812,16 @@ int wmain(int argc, wchar_t** argv) {
         nullptr, nullptr, wc.hInstance, nullptr);
     Check(g_app.hwnd != nullptr, "create hidden isolated test window");
     if (argc > 1 && lstrcmpW(argv[1], L"--preview-localization") == 0) {
-        g_appChinese = argc > 2 ? ResolveInstallLanguage(argv[2], WindowsPrefersChinese())
-                                : InstalledLanguageIsChinese();
-        g_app.gfx.setTextLocale(g_appChinese);
+        if (argc > 2) g_app.cfg.language = ParseAppLanguage(argv[2]);
+        RefreshAppLanguage();
+        g_app.languageAnim = (float)g_app.cfg.language;
+        RefreshPreferenceMotion();
         g_app.cfg.autoSwitch = false;
         g_app.cfg.noTheme = true;
         g_app.cfg.minimizeToTray = false;
+        g_app.glass = false;
         g_app.solidBg = true;
+        RefreshPalette();
         Check(EnsureUiInitialized(), "initialize localization preview");
         ShowWindow(g_app.hwnd, SW_SHOW);
         MSG msg;
@@ -770,6 +841,7 @@ int wmain(int argc, wchar_t** argv) {
     TestFollowAppMode();
     TestLazyGraphicsAndDpi();
     TestLocalization();
+    TestAppearancePickersAndResize();
     TestNativeMinimize();
     TestThumbnails();
     TestShellIdentity();
